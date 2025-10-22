@@ -398,22 +398,87 @@ app.post('/api/location', async (req, res) => {
   try {
     const { userId, latitude, longitude, subjectId, attendanceDocId } = req.body;
 
-    if (!userId || !latitude || !longitude) {
+    if (!userId || !latitude || !longitude || !subjectId) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Store location
+    // Store location in /locations collection
     await db.collection('locations').add({
       userId,
       latitude,
       longitude,
       timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      subjectId: subjectId || null
+      subjectId
     });
 
-    console.log(`📍 Location received from user ${userId} for subject ${subjectId || 'unknown'}`);
+    console.log(`📍 Location received from user ${userId} for subject ${subjectId}`);
 
-    res.json({ success: true, message: 'Location received and stored' });
+    // Get subject data to fetch class location
+    const subjectDoc = await db
+      .collection('users')
+      .doc(userId)
+      .collection('subjects')
+      .doc(subjectId)
+      .get();
+
+    if (!subjectDoc.exists) {
+      console.log(`⚠️ Subject ${subjectId} not found for user ${userId}`);
+      return res.json({ success: true, message: 'Location stored but subject not found' });
+    }
+
+    const subjectData = subjectDoc.data();
+    const classLat = subjectData.location?.latitude;
+    const classLon = subjectData.location?.longitude;
+    const accuracyThreshold = subjectData.location?.accuracy || 50;
+
+    if (!classLat || !classLon) {
+      console.log(`⚠️ No class location set for subject ${subjectId}`);
+      return res.json({ success: true, message: 'Location stored but class location not set' });
+    }
+
+    // Calculate distance
+    const distance = calculateDistance(latitude, longitude, classLat, classLon);
+    console.log(`📏 Distance: ${distance.toFixed(2)}m, Threshold: ${accuracyThreshold}m`);
+
+    // Get current date for attendance
+    const istDate = getISTDate();
+    const day = istDate.getDate();
+    const monthYear = `${istDate.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase()} ${istDate.getFullYear()}`;
+
+    const attendanceRef = db
+      .collection('users')
+      .doc(userId)
+      .collection('subjects')
+      .doc(subjectId)
+      .collection('attendance')
+      .doc(monthYear);
+
+    // Check if already marked
+    const attendanceDoc = await attendanceRef.get();
+    const attendanceData = attendanceDoc.data() || { present: [], absent: [] };
+
+    if (attendanceData.present?.includes(day) || attendanceData.absent?.includes(day)) {
+      console.log(`✅ Attendance already marked for day ${day}`);
+      return res.json({ success: true, message: 'Attendance already marked' });
+    }
+
+    // Mark attendance based on distance
+    if (distance <= accuracyThreshold) {
+      // Mark present
+      await attendanceRef.set({
+        present: admin.firestore.FieldValue.arrayUnion(day)
+      }, { merge: true });
+      console.log(`✅ User ${userId} marked PRESENT for subject ${subjectId} on day ${day}`);
+      res.json({ success: true, message: 'Marked present', distance: distance.toFixed(2) });
+    } else {
+      // Mark absent - too far
+      await attendanceRef.set({
+        absent: admin.firestore.FieldValue.arrayUnion(day)
+      }, { merge: true });
+      console.log(`❌ User ${userId} marked ABSENT for subject ${subjectId} on day ${day} - too far (${distance.toFixed(2)}m)`);
+      res.json({ success: true, message: 'Marked absent - too far', distance: distance.toFixed(2) });
+    }
+
   } catch (error) {
     console.error('❌ Error receiving location:', error);
     res.status(500).json({ error: 'Internal server error' });
