@@ -1,12 +1,23 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const cron = require('node-cron');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(express.json());
 
-// Initialize Firebase Admin
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
+// Initialize Firebase Admin using secret file
+let serviceAccount;
+try {
+  const secretPath = path.join(__dirname, 'serviceAccountKey.json');
+  serviceAccount = JSON.parse(fs.readFileSync(secretPath, 'utf8'));
+  console.log('✅ Firebase service account loaded from file');
+} catch (error) {
+  console.error('❌ Error loading serviceAccountKey.json:', error.message);
+  process.exit(1);
+}
+
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
@@ -15,6 +26,11 @@ const db = admin.firestore();
 
 // In-memory queue for scheduled location requests
 const locationRequestQueue = new Map();
+
+// Utility: Get current time in IST
+function getISTDate() {
+  return new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+}
 
 // Utility: Calculate distance between two coordinates (in meters)
 function calculateDistance(lat1, lon1, lat2, lon2) {
@@ -32,10 +48,11 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// Utility: Get current day name
+// Utility: Get current day name in IST
 function getCurrentDay() {
   const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  return days[new Date().getDay()];
+  const istDate = getISTDate();
+  return days[istDate.getDay()];
 }
 
 // Utility: Parse time string (e.g., "10:57") to minutes since midnight
@@ -103,7 +120,8 @@ async function checkAndMarkAttendance(userId, subjectId, monthYear, subjectData,
     }
 
     // Get recent location from locations collection (within last 10 minutes)
-    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+    const istNow = getISTDate();
+    const tenMinutesAgo = new Date(istNow.getTime() - 10 * 60 * 1000);
     const locationsSnapshot = await db
       .collection('locations')
       .where('userId', '==', userId)
@@ -162,8 +180,8 @@ async function checkAndMarkAttendance(userId, subjectId, monthYear, subjectData,
 // Queue a location request for the middle of class
 function queueLocationRequest(userId, subjectId, fcmToken, subjectData, startMinutes, endMinutes, currentDate) {
   const middleMinutes = Math.floor((startMinutes + endMinutes) / 2);
-  const now = new Date();
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const istNow = getISTDate();
+  const currentMinutes = istNow.getHours() * 60 + istNow.getMinutes();
   
   // Calculate delay until middle of class
   let delayMinutes = middleMinutes - currentMinutes;
@@ -192,7 +210,8 @@ function queueLocationRequest(userId, subjectId, fcmToken, subjectData, startMin
   const timeoutId = setTimeout(async () => {
     console.log(`\n📍 Sending scheduled location request for user ${userId}, subject ${subjectId}`);
     
-    const monthYear = `${now.toLocaleString('default', { month: 'long' }).toLowerCase()} ${now.getFullYear()}`;
+    const istDate = getISTDate();
+    const monthYear = `${istDate.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase()} ${istDate.getFullYear()}`;
     
     // Send FCM location request
     const sent = await sendLocationRequest(fcmToken, userId, subjectId, monthYear);
@@ -201,7 +220,7 @@ function queueLocationRequest(userId, subjectId, fcmToken, subjectData, startMin
       // Wait 5 minutes, then check and mark attendance
       setTimeout(async () => {
         console.log(`\n🔍 Checking attendance for user ${userId}, subject ${subjectId}`);
-        await checkAndMarkAttendance(userId, subjectId, monthYear, subjectData, now.getDate());
+        await checkAndMarkAttendance(userId, subjectId, monthYear, subjectData, istDate.getDate());
         
         // Remove from queue
         locationRequestQueue.delete(queueKey);
@@ -217,18 +236,18 @@ function queueLocationRequest(userId, subjectId, fcmToken, subjectData, startMin
     userId,
     subjectId,
     middleTime,
-    scheduledFor: new Date(Date.now() + delayMs)
+    scheduledFor: new Date(istNow.getTime() + delayMs)
   });
 }
 
 // Main function: Scan all users and queue classes for today
 async function scanAndQueueClasses() {
   const currentDay = getCurrentDay();
-  const now = new Date();
-  const currentDate = now.toISOString().split('T')[0];
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const istNow = getISTDate();
+  const currentDate = istNow.toISOString().split('T')[0];
+  const currentMinutes = istNow.getHours() * 60 + istNow.getMinutes();
 
-  console.log(`\n🔍 Scanning for classes on ${currentDay} - ${now.toLocaleTimeString()}`);
+  console.log(`\n🔍 Scanning for classes on ${currentDay} - ${istNow.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
 
   try {
     // Get all users
@@ -277,7 +296,7 @@ async function scanAndQueueClasses() {
         }
 
         // Check if attendance already marked
-        const monthYear = `${now.toLocaleString('default', { month: 'long' }).toLowerCase()} ${now.getFullYear()}`;
+        const monthYear = `${istNow.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase()} ${istNow.getFullYear()}`;
         const attendanceRef = db
           .collection('users')
           .doc(userId)
@@ -289,8 +308,8 @@ async function scanAndQueueClasses() {
         const attendanceDoc = await attendanceRef.get();
         const attendanceData = attendanceDoc.data() || {};
         
-        if (attendanceData.present?.includes(now.getDate()) || 
-            attendanceData.absent?.includes(now.getDate())) {
+        if (attendanceData.present?.includes(istNow.getDate()) || 
+            attendanceData.absent?.includes(istNow.getDate())) {
           console.log(`✅ Attendance already marked: ${subjectData.course || subjectId} for user ${userId}`);
           continue;
         }
@@ -356,7 +375,8 @@ app.get('/api/queue-status', (req, res) => {
 
   res.json({
     queueSize: locationRequestQueue.size,
-    items: queueItems
+    items: queueItems,
+    currentTimeIST: getISTDate().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
   });
 });
 
@@ -365,6 +385,7 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
+    istTime: getISTDate().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
     queueSize: locationRequestQueue.size
   });
 });
@@ -374,23 +395,28 @@ app.post('/api/trigger-scan', async (req, res) => {
   await scanAndQueueClasses();
   res.json({ 
     message: 'Class scan triggered',
-    queueSize: locationRequestQueue.size
+    queueSize: locationRequestQueue.size,
+    istTime: getISTDate().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
   });
 });
 
 // Run scan at server start
 console.log('🚀 Starting server...');
+console.log('🇮🇳 Using Indian Standard Time (IST)');
 scanAndQueueClasses();
 
-// Schedule daily scan at midnight and every 6 hours
+// Schedule daily scan at midnight and every 6 hours (IST)
 cron.schedule('0 0,6,12,18 * * *', () => {
   console.log('\n⏰ Scheduled scan triggered');
   scanAndQueueClasses();
+}, {
+  timezone: "Asia/Kolkata"
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`⏰ Queue-based scheduler active`);
+  console.log(`⏰ Queue-based scheduler active (IST timezone)`);
   console.log(`📋 Queue size: ${locationRequestQueue.size}`);
+  console.log(`🕐 Current IST: ${getISTDate().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`);
 });
