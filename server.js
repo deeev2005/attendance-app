@@ -1,0 +1,396 @@
+const express = require('express');
+const admin = require('firebase-admin');
+const cron = require('node-cron');
+
+const app = express();
+app.use(express.json());
+
+// Initialize Firebase Admin
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+
+const db = admin.firestore();
+
+// In-memory queue for scheduled location requests
+const locationRequestQueue = new Map();
+
+// Utility: Calculate distance between two coordinates (in meters)
+function calculateDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371e3;
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δφ = (lat2 - lat1) * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+  const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+    Math.cos(φ1) * Math.cos(φ2) *
+    Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return R * c;
+}
+
+// Utility: Get current day name
+function getCurrentDay() {
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  return days[new Date().getDay()];
+}
+
+// Utility: Parse time string (e.g., "10:57") to minutes since midnight
+function timeToMinutes(timeStr) {
+  const [hours, minutes] = timeStr.split(':').map(Number);
+  return hours * 60 + minutes;
+}
+
+// Utility: Get time string from minutes
+function minutesToTime(minutes) {
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`;
+}
+
+// Send FCM notification to request location
+async function sendLocationRequest(fcmToken, userId, subjectId, attendanceDocId) {
+  try {
+    const message = {
+      token: fcmToken,
+      data: {
+        type: 'location_request',
+        userId: userId,
+        subjectId: subjectId,
+        attendanceDocId: attendanceDocId,
+        timestamp: Date.now().toString()
+      },
+      android: {
+        priority: 'high'
+      },
+      apns: {
+        headers: {
+          'apns-priority': '10'
+        }
+      }
+    };
+
+    await admin.messaging().send(message);
+    console.log(`✅ Location request sent to user: ${userId} for subject: ${subjectId}`);
+    return true;
+  } catch (error) {
+    console.error(`❌ Failed to send FCM to user ${userId}:`, error.message);
+    return false;
+  }
+}
+
+// Check and mark attendance based on location
+async function checkAndMarkAttendance(userId, subjectId, monthYear, subjectData, day) {
+  try {
+    const attendanceRef = db
+      .collection('users')
+      .doc(userId)
+      .collection('subjects')
+      .doc(subjectId)
+      .collection('attendance')
+      .doc(monthYear);
+
+    const attendanceDoc = await attendanceRef.get();
+    const attendanceData = attendanceDoc.data() || { present: [], absent: [] };
+
+    // Check if already marked
+    if (attendanceData.present?.includes(day) || attendanceData.absent?.includes(day)) {
+      console.log(`✅ Attendance already processed for user ${userId}, subject ${subjectId}`);
+      return;
+    }
+
+    // Get recent location from locations collection (within last 10 minutes)
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+    const locationsSnapshot = await db
+      .collection('locations')
+      .where('userId', '==', userId)
+      .where('subjectId', '==', subjectId)
+      .where('timestamp', '>=', tenMinutesAgo)
+      .orderBy('timestamp', 'desc')
+      .limit(1)
+      .get();
+
+    if (locationsSnapshot.empty) {
+      // No location received, mark absent
+      await attendanceRef.set({
+        absent: admin.firestore.FieldValue.arrayUnion(day)
+      }, { merge: true });
+      console.log(`❌ User ${userId}, Subject ${subjectId} marked ABSENT - no location received`);
+      return;
+    }
+
+    const locationData = locationsSnapshot.docs[0].data();
+    const userLat = locationData.latitude;
+    const userLon = locationData.longitude;
+
+    // Get subject location
+    const classLat = subjectData.location?.latitude;
+    const classLon = subjectData.location?.longitude;
+    const accuracyThreshold = subjectData.location?.accuracy || 50;
+
+    if (!classLat || !classLon) {
+      console.log(`⚠️ No class location set for subject ${subjectId}`);
+      return;
+    }
+
+    // Calculate distance
+    const distance = calculateDistance(userLat, userLon, classLat, classLon);
+
+    console.log(`📏 User ${userId}, Subject ${subjectId} - Distance: ${distance.toFixed(2)}m, Threshold: ${accuracyThreshold}m`);
+
+    if (distance <= accuracyThreshold) {
+      // Mark present
+      await attendanceRef.set({
+        present: admin.firestore.FieldValue.arrayUnion(day)
+      }, { merge: true });
+      console.log(`✅ User ${userId}, Subject ${subjectId} marked PRESENT`);
+    } else {
+      // Mark absent - too far
+      await attendanceRef.set({
+        absent: admin.firestore.FieldValue.arrayUnion(day)
+      }, { merge: true });
+      console.log(`❌ User ${userId}, Subject ${subjectId} marked ABSENT - too far (${distance.toFixed(2)}m)`);
+    }
+  } catch (error) {
+    console.error(`❌ Error marking attendance for user ${userId}, subject ${subjectId}:`, error);
+  }
+}
+
+// Queue a location request for the middle of class
+function queueLocationRequest(userId, subjectId, fcmToken, subjectData, startMinutes, endMinutes, currentDate) {
+  const middleMinutes = Math.floor((startMinutes + endMinutes) / 2);
+  const now = new Date();
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  
+  // Calculate delay until middle of class
+  let delayMinutes = middleMinutes - currentMinutes;
+  
+  // If middle time already passed today, skip
+  if (delayMinutes < 0) {
+    console.log(`⏭️ Class middle time already passed for user ${userId}, subject ${subjectId}`);
+    return;
+  }
+
+  const delayMs = delayMinutes * 60 * 1000;
+  const middleTime = minutesToTime(middleMinutes);
+  
+  const queueKey = `${userId}_${subjectId}_${currentDate}`;
+  
+  // Check if already queued
+  if (locationRequestQueue.has(queueKey)) {
+    console.log(`⏭️ Already queued: user ${userId}, subject ${subjectId}`);
+    return;
+  }
+
+  console.log(`📋 QUEUED: User ${userId}, Subject ${subjectId}`);
+  console.log(`   ⏰ Will send location request at ${middleTime} (in ${delayMinutes} minutes)`);
+
+  // Schedule the location request
+  const timeoutId = setTimeout(async () => {
+    console.log(`\n📍 Sending scheduled location request for user ${userId}, subject ${subjectId}`);
+    
+    const monthYear = `${now.toLocaleString('default', { month: 'long' }).toLowerCase()} ${now.getFullYear()}`;
+    
+    // Send FCM location request
+    const sent = await sendLocationRequest(fcmToken, userId, subjectId, monthYear);
+    
+    if (sent) {
+      // Wait 5 minutes, then check and mark attendance
+      setTimeout(async () => {
+        console.log(`\n🔍 Checking attendance for user ${userId}, subject ${subjectId}`);
+        await checkAndMarkAttendance(userId, subjectId, monthYear, subjectData, now.getDate());
+        
+        // Remove from queue
+        locationRequestQueue.delete(queueKey);
+      }, 5 * 60 * 1000); // 5 minutes wait
+    } else {
+      locationRequestQueue.delete(queueKey);
+    }
+  }, delayMs);
+
+  // Store in queue
+  locationRequestQueue.set(queueKey, {
+    timeoutId,
+    userId,
+    subjectId,
+    middleTime,
+    scheduledFor: new Date(Date.now() + delayMs)
+  });
+}
+
+// Main function: Scan all users and queue classes for today
+async function scanAndQueueClasses() {
+  const currentDay = getCurrentDay();
+  const now = new Date();
+  const currentDate = now.toISOString().split('T')[0];
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+
+  console.log(`\n🔍 Scanning for classes on ${currentDay} - ${now.toLocaleTimeString()}`);
+
+  try {
+    // Get all users
+    const usersSnapshot = await db.collection('users').get();
+
+    let classesFound = 0;
+    let classesQueued = 0;
+
+    for (const userDoc of usersSnapshot.docs) {
+      const userId = userDoc.id;
+      const userData = userDoc.data();
+      const fcmToken = userData.fcmToken;
+
+      if (!fcmToken) {
+        console.log(`⚠️ User ${userId} (${userData.name || 'No name'}) has no FCM token`);
+        continue;
+      }
+
+      // Get user's subjects
+      const subjectsSnapshot = await db
+        .collection('users')
+        .doc(userId)
+        .collection('subjects')
+        .get();
+
+      for (const subjectDoc of subjectsSnapshot.docs) {
+        const subjectId = subjectDoc.id;
+        const subjectData = subjectDoc.data();
+        const schedule = subjectData.schedule;
+
+        if (!schedule || !schedule[currentDay]) continue;
+
+        classesFound++;
+
+        const classTime = schedule[currentDay];
+        const [startTime, endTime] = classTime.split('-');
+        
+        const startMinutes = timeToMinutes(startTime.trim());
+        const endMinutes = timeToMinutes(endTime.trim());
+        const middleMinutes = Math.floor((startMinutes + endMinutes) / 2);
+
+        // Skip if class already finished
+        if (endMinutes < currentMinutes) {
+          console.log(`⏭️ Class finished: ${subjectData.course || subjectId} for user ${userId}`);
+          continue;
+        }
+
+        // Check if attendance already marked
+        const monthYear = `${now.toLocaleString('default', { month: 'long' }).toLowerCase()} ${now.getFullYear()}`;
+        const attendanceRef = db
+          .collection('users')
+          .doc(userId)
+          .collection('subjects')
+          .doc(subjectId)
+          .collection('attendance')
+          .doc(monthYear);
+
+        const attendanceDoc = await attendanceRef.get();
+        const attendanceData = attendanceDoc.data() || {};
+        
+        if (attendanceData.present?.includes(now.getDate()) || 
+            attendanceData.absent?.includes(now.getDate())) {
+          console.log(`✅ Attendance already marked: ${subjectData.course || subjectId} for user ${userId}`);
+          continue;
+        }
+
+        // Queue the location request
+        queueLocationRequest(
+          userId, 
+          subjectId, 
+          fcmToken, 
+          subjectData, 
+          startMinutes, 
+          endMinutes, 
+          currentDate
+        );
+        classesQueued++;
+      }
+    }
+
+    console.log(`\n📊 Summary: ${classesFound} classes found, ${classesQueued} queued for today`);
+    console.log(`📋 Total items in queue: ${locationRequestQueue.size}`);
+
+  } catch (error) {
+    console.error('❌ Error in scanAndQueueClasses:', error);
+  }
+}
+
+// API endpoint to receive location from mobile app
+app.post('/api/location', async (req, res) => {
+  try {
+    const { userId, latitude, longitude, subjectId, attendanceDocId } = req.body;
+
+    if (!userId || !latitude || !longitude) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Store location
+    await db.collection('locations').add({
+      userId,
+      latitude,
+      longitude,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      subjectId: subjectId || null
+    });
+
+    console.log(`📍 Location received from user ${userId} for subject ${subjectId || 'unknown'}`);
+
+    res.json({ success: true, message: 'Location received and stored' });
+  } catch (error) {
+    console.error('❌ Error receiving location:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// API endpoint to get queue status
+app.get('/api/queue-status', (req, res) => {
+  const queueItems = Array.from(locationRequestQueue.entries()).map(([key, value]) => ({
+    key,
+    userId: value.userId,
+    subjectId: value.subjectId,
+    middleTime: value.middleTime,
+    scheduledFor: value.scheduledFor
+  }));
+
+  res.json({
+    queueSize: locationRequestQueue.size,
+    items: queueItems
+  });
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    queueSize: locationRequestQueue.size
+  });
+});
+
+// Manual trigger endpoint (for testing)
+app.post('/api/trigger-scan', async (req, res) => {
+  await scanAndQueueClasses();
+  res.json({ 
+    message: 'Class scan triggered',
+    queueSize: locationRequestQueue.size
+  });
+});
+
+// Run scan at server start
+console.log('🚀 Starting server...');
+scanAndQueueClasses();
+
+// Schedule daily scan at midnight and every 6 hours
+cron.schedule('0 0,6,12,18 * * *', () => {
+  console.log('\n⏰ Scheduled scan triggered');
+  scanAndQueueClasses();
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`⏰ Queue-based scheduler active`);
+  console.log(`📋 Queue size: ${locationRequestQueue.size}`);
+});
