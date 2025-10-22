@@ -29,7 +29,9 @@ const locationRequestQueue = new Map();
 
 // Utility: Get current time in IST
 function getISTDate() {
-  return new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const utcDate = new Date();
+  // Convert UTC to IST by adding 5 hours 30 minutes (19800000 milliseconds)
+  return new Date(utcDate.getTime() + (5.5 * 60 * 60 * 1000));
 }
 
 // Utility: Calculate distance between two coordinates (in meters)
@@ -186,10 +188,15 @@ function queueLocationRequest(userId, subjectId, fcmToken, subjectData, startMin
   // Calculate delay until middle of class
   let delayMinutes = middleMinutes - currentMinutes;
   
-  // If middle time already passed today, skip
+  // If middle time already passed, send immediately if class is still ongoing
   if (delayMinutes < 0) {
-    console.log(`⏭️ Class middle time already passed for user ${userId}, subject ${subjectId}`);
-    return;
+    if (currentMinutes <= endMinutes) {
+      console.log(`⚡ Class in progress for user ${userId}, subject ${subjectId} - sending location request immediately`);
+      delayMinutes = 0; // Send immediately
+    } else {
+      console.log(`⏭️ Class already ended for user ${userId}, subject ${subjectId}`);
+      return;
+    }
   }
 
   const delayMs = delayMinutes * 60 * 1000;
