@@ -280,51 +280,101 @@ async function scanAndQueueClasses() {
 
         if (!schedule || !schedule[currentDay]) continue;
 
-        classesFound++;
-
-        const classTime = schedule[currentDay];
-        const [startTime, endTime] = classTime.split('-');
+        const daySchedule = schedule[currentDay];
         
-        const startMinutes = timeToMinutes(startTime.trim());
-        const endMinutes = timeToMinutes(endTime.trim());
-        const middleMinutes = Math.floor((startMinutes + endMinutes) / 2);
+        // Handle array format (new structure)
+        if (Array.isArray(daySchedule)) {
+          for (const classTime of daySchedule) {
+            if (!classTime.start || !classTime.end) continue;
+            
+            classesFound++;
+            
+            const startMinutes = timeToMinutes(classTime.start);
+            const endMinutes = timeToMinutes(classTime.end);
 
-        // Skip if class already finished
-        if (endMinutes < currentMinutes) {
-          console.log(`⏭️ Class finished: ${subjectData.course || subjectId} for user ${userId}`);
-          continue;
+            // Skip if class already finished
+            if (endMinutes < currentMinutes) {
+              console.log(`⏭️ Class finished: ${subjectData.course || subjectId} for user ${userId}`);
+              continue;
+            }
+
+            // Check if attendance already marked
+            const monthYear = `${istNow.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase()} ${istNow.getFullYear()}`;
+            const attendanceRef = db
+              .collection('users')
+              .doc(userId)
+              .collection('subjects')
+              .doc(subjectId)
+              .collection('attendance')
+              .doc(monthYear);
+
+            const attendanceDoc = await attendanceRef.get();
+            const attendanceData = attendanceDoc.data() || {};
+            
+            if (attendanceData.present?.includes(istNow.getDate()) || 
+                attendanceData.absent?.includes(istNow.getDate())) {
+              console.log(`✅ Attendance already marked: ${subjectData.course || subjectId} for user ${userId}`);
+              continue;
+            }
+
+            // Queue the location request
+            queueLocationRequest(
+              userId, 
+              subjectId, 
+              fcmToken, 
+              subjectData, 
+              startMinutes, 
+              endMinutes, 
+              currentDate
+            );
+            classesQueued++;
+          }
+        } else {
+          // Handle string format (old structure) - "10:57-11:57"
+          classesFound++;
+
+          const [startTime, endTime] = daySchedule.split('-');
+          
+          const startMinutes = timeToMinutes(startTime.trim());
+          const endMinutes = timeToMinutes(endTime.trim());
+
+          // Skip if class already finished
+          if (endMinutes < currentMinutes) {
+            console.log(`⏭️ Class finished: ${subjectData.course || subjectId} for user ${userId}`);
+            continue;
+          }
+
+          // Check if attendance already marked
+          const monthYear = `${istNow.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase()} ${istNow.getFullYear()}`;
+          const attendanceRef = db
+            .collection('users')
+            .doc(userId)
+            .collection('subjects')
+            .doc(subjectId)
+            .collection('attendance')
+            .doc(monthYear);
+
+          const attendanceDoc = await attendanceRef.get();
+          const attendanceData = attendanceDoc.data() || {};
+          
+          if (attendanceData.present?.includes(istNow.getDate()) || 
+              attendanceData.absent?.includes(istNow.getDate())) {
+            console.log(`✅ Attendance already marked: ${subjectData.course || subjectId} for user ${userId}`);
+            continue;
+          }
+
+          // Queue the location request
+          queueLocationRequest(
+            userId, 
+            subjectId, 
+            fcmToken, 
+            subjectData, 
+            startMinutes, 
+            endMinutes, 
+            currentDate
+          );
+          classesQueued++;
         }
-
-        // Check if attendance already marked
-        const monthYear = `${istNow.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase()} ${istNow.getFullYear()}`;
-        const attendanceRef = db
-          .collection('users')
-          .doc(userId)
-          .collection('subjects')
-          .doc(subjectId)
-          .collection('attendance')
-          .doc(monthYear);
-
-        const attendanceDoc = await attendanceRef.get();
-        const attendanceData = attendanceDoc.data() || {};
-        
-        if (attendanceData.present?.includes(istNow.getDate()) || 
-            attendanceData.absent?.includes(istNow.getDate())) {
-          console.log(`✅ Attendance already marked: ${subjectData.course || subjectId} for user ${userId}`);
-          continue;
-        }
-
-        // Queue the location request
-        queueLocationRequest(
-          userId, 
-          subjectId, 
-          fcmToken, 
-          subjectData, 
-          startMinutes, 
-          endMinutes, 
-          currentDate
-        );
-        classesQueued++;
       }
     }
 
