@@ -30,7 +30,6 @@ const locationRequestQueue = new Map();
 // Utility: Get current time in IST
 function getISTDate() {
   const utcDate = new Date();
-  // Convert UTC to IST by adding 5 hours 30 minutes (19800000 milliseconds)
   return new Date(utcDate.getTime() + (5.5 * 60 * 60 * 1000));
 }
 
@@ -117,18 +116,20 @@ async function checkAndMarkAttendance(userId, subjectId, monthYear, subjectData,
 
     // Check if already marked
     if (attendanceData.present?.includes(day) || attendanceData.absent?.includes(day)) {
-      console.log(`✅ Attendance already processed for user ${userId}, subject ${subjectId}`);
+      console.log(`✅ Attendance already processed for user ${userId}, subject ${subjectId}, day ${day}`);
       return;
     }
+
+    console.log(`🔍 Checking for location data for user ${userId}, subject ${subjectId}...`);
 
     // Get recent location from locations collection (within last 10 minutes)
     const istNow = getISTDate();
     const tenMinutesAgo = new Date(istNow.getTime() - 10 * 60 * 1000);
+    
     const locationsSnapshot = await db
       .collection('locations')
       .where('userId', '==', userId)
       .where('subjectId', '==', subjectId)
-      .where('timestamp', '>=', tenMinutesAgo)
       .orderBy('timestamp', 'desc')
       .limit(1)
       .get();
@@ -138,18 +139,35 @@ async function checkAndMarkAttendance(userId, subjectId, monthYear, subjectData,
       await attendanceRef.set({
         absent: admin.firestore.FieldValue.arrayUnion(day)
       }, { merge: true });
-      console.log(`❌ User ${userId}, Subject ${subjectId} marked ABSENT - no location received`);
+      console.log(`❌ User ${userId}, Subject ${subjectId}, Day ${day} marked ABSENT - no location received`);
       return;
     }
 
-    const locationData = locationsSnapshot.docs[0].data();
+    const locationDoc = locationsSnapshot.docs[0];
+    const locationData = locationDoc.data();
+    
+    // Check if location is recent (within 10 minutes)
+    const locationTimestamp = locationData.timestamp?.toDate();
+    if (locationTimestamp && locationTimestamp < tenMinutesAgo) {
+      console.log(`⚠️ Location too old for user ${userId}, marking absent`);
+      await attendanceRef.set({
+        absent: admin.firestore.FieldValue.arrayUnion(day)
+      }, { merge: true });
+      console.log(`❌ User ${userId}, Subject ${subjectId}, Day ${day} marked ABSENT - location too old`);
+      return;
+    }
+
     const userLat = locationData.latitude;
     const userLon = locationData.longitude;
+
+    console.log(`📍 User location found: lat=${userLat}, lon=${userLon}`);
 
     // Get subject location
     const classLat = subjectData.location?.latitude;
     const classLon = subjectData.location?.longitude;
     const accuracyThreshold = subjectData.location?.accuracy || 50;
+
+    console.log(`🏫 Class location: lat=${classLat}, lon=${classLon}, threshold=${accuracyThreshold}m`);
 
     if (!classLat || !classLon) {
       console.log(`⚠️ No class location set for subject ${subjectId}`);
@@ -159,23 +177,24 @@ async function checkAndMarkAttendance(userId, subjectId, monthYear, subjectData,
     // Calculate distance
     const distance = calculateDistance(userLat, userLon, classLat, classLon);
 
-    console.log(`📏 User ${userId}, Subject ${subjectId} - Distance: ${distance.toFixed(2)}m, Threshold: ${accuracyThreshold}m`);
+    console.log(`📏 User ${userId}, Subject ${subjectId}, Day ${day} - Distance: ${distance.toFixed(2)}m, Threshold: ${accuracyThreshold}m`);
 
     if (distance <= accuracyThreshold) {
       // Mark present
       await attendanceRef.set({
         present: admin.firestore.FieldValue.arrayUnion(day)
       }, { merge: true });
-      console.log(`✅ User ${userId}, Subject ${subjectId} marked PRESENT`);
+      console.log(`✅✅✅ User ${userId}, Subject ${subjectId}, Day ${day} marked PRESENT ✅✅✅`);
     } else {
       // Mark absent - too far
       await attendanceRef.set({
         absent: admin.firestore.FieldValue.arrayUnion(day)
       }, { merge: true });
-      console.log(`❌ User ${userId}, Subject ${subjectId} marked ABSENT - too far (${distance.toFixed(2)}m)`);
+      console.log(`❌ User ${userId}, Subject ${subjectId}, Day ${day} marked ABSENT - too far (${distance.toFixed(2)}m)`);
     }
   } catch (error) {
     console.error(`❌ Error marking attendance for user ${userId}, subject ${subjectId}:`, error);
+    console.error('Error details:', error.stack);
   }
 }
 
@@ -185,14 +204,12 @@ function queueLocationRequest(userId, subjectId, fcmToken, subjectData, startMin
   const istNow = getISTDate();
   const currentMinutes = istNow.getHours() * 60 + istNow.getMinutes();
   
-  // Calculate delay until middle of class
   let delayMinutes = middleMinutes - currentMinutes;
   
-  // If middle time already passed, send immediately if class is still ongoing
   if (delayMinutes < 0) {
     if (currentMinutes <= endMinutes) {
       console.log(`⚡ Class in progress for user ${userId}, subject ${subjectId} - sending location request immediately`);
-      delayMinutes = 0; // Send immediately
+      delayMinutes = 0;
     } else {
       console.log(`⏭️ Class already ended for user ${userId}, subject ${subjectId}`);
       return;
@@ -204,7 +221,6 @@ function queueLocationRequest(userId, subjectId, fcmToken, subjectData, startMin
   
   const queueKey = `${userId}_${subjectId}_${currentDate}`;
   
-  // Check if already queued
   if (locationRequestQueue.has(queueKey)) {
     console.log(`⏭️ Already queued: user ${userId}, subject ${subjectId}`);
     return;
@@ -213,14 +229,12 @@ function queueLocationRequest(userId, subjectId, fcmToken, subjectData, startMin
   console.log(`📋 QUEUED: User ${userId}, Subject ${subjectId}`);
   console.log(`   ⏰ Will send location request at ${middleTime} (in ${delayMinutes} minutes)`);
 
-  // Schedule the location request
   const timeoutId = setTimeout(async () => {
     console.log(`\n📍 Sending scheduled location request for user ${userId}, subject ${subjectId}`);
     
     const istDate = getISTDate();
     const monthYear = `${istDate.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase()} ${istDate.getFullYear()}`;
     
-    // Send FCM location request
     const sent = await sendLocationRequest(fcmToken, userId, subjectId, monthYear);
     
     if (sent) {
@@ -229,15 +243,13 @@ function queueLocationRequest(userId, subjectId, fcmToken, subjectData, startMin
         console.log(`\n🔍 Checking attendance for user ${userId}, subject ${subjectId}`);
         await checkAndMarkAttendance(userId, subjectId, monthYear, subjectData, istDate.getDate());
         
-        // Remove from queue
         locationRequestQueue.delete(queueKey);
-      }, 5 * 60 * 1000); // 5 minutes wait
+      }, 5 * 60 * 1000);
     } else {
       locationRequestQueue.delete(queueKey);
     }
   }, delayMs);
 
-  // Store in queue
   locationRequestQueue.set(queueKey, {
     timeoutId,
     userId,
@@ -257,7 +269,6 @@ async function scanAndQueueClasses() {
   console.log(`\n🔍 Scanning for classes on ${currentDay} - ${istNow.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
 
   try {
-    // Get all users
     const usersSnapshot = await db.collection('users').get();
 
     let classesFound = 0;
@@ -273,7 +284,6 @@ async function scanAndQueueClasses() {
         continue;
       }
 
-      // Get user's subjects
       const subjectsSnapshot = await db
         .collection('users')
         .doc(userId)
@@ -289,7 +299,6 @@ async function scanAndQueueClasses() {
 
         const daySchedule = schedule[currentDay];
         
-        // Handle array format (new structure)
         if (Array.isArray(daySchedule)) {
           for (const classTime of daySchedule) {
             if (!classTime.start || !classTime.end) continue;
@@ -299,13 +308,11 @@ async function scanAndQueueClasses() {
             const startMinutes = timeToMinutes(classTime.start);
             const endMinutes = timeToMinutes(classTime.end);
 
-            // Skip if class already finished
             if (endMinutes < currentMinutes) {
               console.log(`⏭️ Class finished: ${subjectData.course || subjectId} for user ${userId}`);
               continue;
             }
 
-            // Check if attendance already marked
             const monthYear = `${istNow.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase()} ${istNow.getFullYear()}`;
             const attendanceRef = db
               .collection('users')
@@ -324,7 +331,6 @@ async function scanAndQueueClasses() {
               continue;
             }
 
-            // Queue the location request
             queueLocationRequest(
               userId, 
               subjectId, 
@@ -337,7 +343,6 @@ async function scanAndQueueClasses() {
             classesQueued++;
           }
         } else {
-          // Handle string format (old structure) - "10:57-11:57"
           classesFound++;
 
           const [startTime, endTime] = daySchedule.split('-');
@@ -345,13 +350,11 @@ async function scanAndQueueClasses() {
           const startMinutes = timeToMinutes(startTime.trim());
           const endMinutes = timeToMinutes(endTime.trim());
 
-          // Skip if class already finished
           if (endMinutes < currentMinutes) {
             console.log(`⏭️ Class finished: ${subjectData.course || subjectId} for user ${userId}`);
             continue;
           }
 
-          // Check if attendance already marked
           const monthYear = `${istNow.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase()} ${istNow.getFullYear()}`;
           const attendanceRef = db
             .collection('users')
@@ -370,7 +373,6 @@ async function scanAndQueueClasses() {
             continue;
           }
 
-          // Queue the location request
           queueLocationRequest(
             userId, 
             subjectId, 
@@ -398,12 +400,14 @@ app.post('/api/location', async (req, res) => {
   try {
     const { userId, latitude, longitude, subjectId, attendanceDocId } = req.body;
 
+    console.log(`\n📱 Received location from app:`, { userId, latitude, longitude, subjectId });
+
     if (!userId || !latitude || !longitude || !subjectId) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
     // Store location in /locations collection
-    await db.collection('locations').add({
+    const locationRef = await db.collection('locations').add({
       userId,
       latitude,
       longitude,
@@ -411,7 +415,7 @@ app.post('/api/location', async (req, res) => {
       subjectId
     });
 
-    console.log(`📍 Location received from user ${userId} for subject ${subjectId}`);
+    console.log(`✅ Location stored in /locations/${locationRef.id}`);
 
     // Get subject data to fetch class location
     const subjectDoc = await db
@@ -431,6 +435,8 @@ app.post('/api/location', async (req, res) => {
     const classLon = subjectData.location?.longitude;
     const accuracyThreshold = subjectData.location?.accuracy || 50;
 
+    console.log(`🏫 Class location:`, { classLat, classLon, accuracyThreshold });
+
     if (!classLat || !classLon) {
       console.log(`⚠️ No class location set for subject ${subjectId}`);
       return res.json({ success: true, message: 'Location stored but class location not set' });
@@ -438,12 +444,14 @@ app.post('/api/location', async (req, res) => {
 
     // Calculate distance
     const distance = calculateDistance(latitude, longitude, classLat, classLon);
-    console.log(`📏 Distance: ${distance.toFixed(2)}m, Threshold: ${accuracyThreshold}m`);
+    console.log(`📏 Distance calculated: ${distance.toFixed(2)}m (threshold: ${accuracyThreshold}m)`);
 
     // Get current date for attendance
     const istDate = getISTDate();
     const day = istDate.getDate();
     const monthYear = `${istDate.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase()} ${istDate.getFullYear()}`;
+
+    console.log(`📅 Attendance document: ${monthYear}, Day: ${day}`);
 
     const attendanceRef = db
       .collection('users')
@@ -457,6 +465,8 @@ app.post('/api/location', async (req, res) => {
     const attendanceDoc = await attendanceRef.get();
     const attendanceData = attendanceDoc.data() || { present: [], absent: [] };
 
+    console.log(`📝 Current attendance data:`, attendanceData);
+
     if (attendanceData.present?.includes(day) || attendanceData.absent?.includes(day)) {
       console.log(`✅ Attendance already marked for day ${day}`);
       return res.json({ success: true, message: 'Attendance already marked' });
@@ -468,20 +478,21 @@ app.post('/api/location', async (req, res) => {
       await attendanceRef.set({
         present: admin.firestore.FieldValue.arrayUnion(day)
       }, { merge: true });
-      console.log(`✅ User ${userId} marked PRESENT for subject ${subjectId} on day ${day}`);
-      res.json({ success: true, message: 'Marked present', distance: distance.toFixed(2) });
+      console.log(`✅✅✅ User ${userId} marked PRESENT for subject ${subjectId} on day ${day} ✅✅✅`);
+      res.json({ success: true, message: 'Marked present', distance: distance.toFixed(2), day: day });
     } else {
       // Mark absent - too far
       await attendanceRef.set({
         absent: admin.firestore.FieldValue.arrayUnion(day)
       }, { merge: true });
       console.log(`❌ User ${userId} marked ABSENT for subject ${subjectId} on day ${day} - too far (${distance.toFixed(2)}m)`);
-      res.json({ success: true, message: 'Marked absent - too far', distance: distance.toFixed(2) });
+      res.json({ success: true, message: 'Marked absent - too far', distance: distance.toFixed(2), day: day });
     }
 
   } catch (error) {
     console.error('❌ Error receiving location:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
