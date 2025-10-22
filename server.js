@@ -455,8 +455,8 @@ console.log('🚀 Starting server...');
 console.log('🇮🇳 Using Indian Standard Time (IST)');
 scanAndQueueClasses();
 
-// Schedule daily scan at midnight and every 6 hours (IST)
-cron.schedule('0 0,6,12,18 * * *', () => {
+// Schedule scan every minute (IST)
+cron.schedule('* * * * *', () => {
   console.log('\n⏰ Scheduled scan triggered');
   scanAndQueueClasses();
 }, {
