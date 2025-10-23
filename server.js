@@ -1,12 +1,36 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const cron = require('node-cron');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(express.json());
 
 // Initialize Firebase Admin
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
+let serviceAccount;
+
+// Try to load from secret file first (Render Secret Files)
+const secretFilePath = '/etc/secrets/serviceAccountKey.json';
+if (fs.existsSync(secretFilePath)) {
+  console.log('📂 Loading service account from secret file...');
+  serviceAccount = JSON.parse(fs.readFileSync(secretFilePath, 'utf8'));
+} 
+// Fallback to local file (for development)
+else if (fs.existsSync('./serviceAccountKey.json')) {
+  console.log('📂 Loading service account from local file...');
+  serviceAccount = require('./serviceAccountKey.json');
+}
+// Fallback to environment variable
+else if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  console.log('📂 Loading service account from environment variable...');
+  serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+}
+else {
+  console.error('❌ No service account found! Please add serviceAccountKey.json as a Secret File in Render.');
+  process.exit(1);
+}
+
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
@@ -561,6 +585,7 @@ app.post('/api/trigger-process', async (req, res) => {
 
 // Run on server start
 console.log('🚀 Starting server...');
+setupLocationListener();
 scanAndQueueClasses().then(() => {
   processQueue();
 });
