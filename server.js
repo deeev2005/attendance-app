@@ -400,13 +400,18 @@ app.post('/api/location', async (req, res) => {
   try {
     const { userId, latitude, longitude, subjectId, attendanceDocId } = req.body;
 
-    console.log(`\n📱 Received location from app:`, { userId, latitude, longitude, subjectId });
+    console.log(`\n📱📱📱 LOCATION RECEIVED FROM MOBILE APP 📱📱📱`);
+    console.log(`User: ${userId}`);
+    console.log(`Subject: ${subjectId}`);
+    console.log(`Latitude: ${latitude}`);
+    console.log(`Longitude: ${longitude}`);
 
     if (!userId || !latitude || !longitude || !subjectId) {
+      console.log(`❌ Missing required fields`);
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Store location in /locations collection
+    // STEP 1: Store location in /locations collection (for record keeping)
     const locationRef = await db.collection('locations').add({
       userId,
       latitude,
@@ -417,7 +422,7 @@ app.post('/api/location', async (req, res) => {
 
     console.log(`✅ Location stored in /locations/${locationRef.id}`);
 
-    // Get subject data to fetch class location
+    // STEP 2: Get subject data to fetch class location
     const subjectDoc = await db
       .collection('users')
       .doc(userId)
@@ -435,23 +440,32 @@ app.post('/api/location', async (req, res) => {
     const classLon = subjectData.location?.longitude;
     const accuracyThreshold = subjectData.location?.accuracy || 50;
 
-    console.log(`🏫 Class location:`, { classLat, classLon, accuracyThreshold });
+    console.log(`\n🏫 CLASS LOCATION DATA:`);
+    console.log(`   Latitude: ${classLat}`);
+    console.log(`   Longitude: ${classLon}`);
+    console.log(`   Accuracy Threshold: ${accuracyThreshold}m`);
 
     if (!classLat || !classLon) {
       console.log(`⚠️ No class location set for subject ${subjectId}`);
       return res.json({ success: true, message: 'Location stored but class location not set' });
     }
 
-    // Calculate distance
+    // STEP 3: Calculate distance
     const distance = calculateDistance(latitude, longitude, classLat, classLon);
-    console.log(`📏 Distance calculated: ${distance.toFixed(2)}m (threshold: ${accuracyThreshold}m)`);
+    console.log(`\n📏 DISTANCE CALCULATION:`);
+    console.log(`   Distance: ${distance.toFixed(2)}m`);
+    console.log(`   Threshold: ${accuracyThreshold}m`);
+    console.log(`   Within range: ${distance <= accuracyThreshold ? 'YES ✅' : 'NO ❌'}`);
 
-    // Get current date for attendance
+    // STEP 4: Get current date for attendance
     const istDate = getISTDate();
     const day = istDate.getDate();
     const monthYear = `${istDate.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase()} ${istDate.getFullYear()}`;
 
-    console.log(`📅 Attendance document: ${monthYear}, Day: ${day}`);
+    console.log(`\n📅 ATTENDANCE DOCUMENT INFO:`);
+    console.log(`   Document: ${monthYear}`);
+    console.log(`   Day: ${day}`);
+    console.log(`   Path: /users/${userId}/subjects/${subjectId}/attendance/${monthYear}`);
 
     const attendanceRef = db
       .collection('users')
@@ -461,36 +475,71 @@ app.post('/api/location', async (req, res) => {
       .collection('attendance')
       .doc(monthYear);
 
-    // Check if already marked
+    // STEP 5: Check if already marked
     const attendanceDoc = await attendanceRef.get();
     const attendanceData = attendanceDoc.data() || { present: [], absent: [] };
 
-    console.log(`📝 Current attendance data:`, attendanceData);
+    console.log(`\n📝 CURRENT ATTENDANCE:`);
+    console.log(`   Present days: [${attendanceData.present?.join(', ') || 'none'}]`);
+    console.log(`   Absent days: [${attendanceData.absent?.join(', ') || 'none'}]`);
+    console.log(`   Already marked for day ${day}: ${attendanceData.present?.includes(day) || attendanceData.absent?.includes(day) ? 'YES' : 'NO'}`);
 
     if (attendanceData.present?.includes(day) || attendanceData.absent?.includes(day)) {
-      console.log(`✅ Attendance already marked for day ${day}`);
-      return res.json({ success: true, message: 'Attendance already marked' });
+      console.log(`⚠️ Attendance already marked for day ${day}, skipping...`);
+      return res.json({ 
+        success: true, 
+        message: 'Attendance already marked',
+        alreadyMarked: true,
+        day: day
+      });
     }
 
-    // Mark attendance based on distance
+    // STEP 6: Mark attendance based on distance
+    console.log(`\n🎯 MARKING ATTENDANCE...`);
+    
     if (distance <= accuracyThreshold) {
       // Mark present
       await attendanceRef.set({
         present: admin.firestore.FieldValue.arrayUnion(day)
       }, { merge: true });
-      console.log(`✅✅✅ User ${userId} marked PRESENT for subject ${subjectId} on day ${day} ✅✅✅`);
-      res.json({ success: true, message: 'Marked present', distance: distance.toFixed(2), day: day });
+      
+      console.log(`\n✅✅✅ SUCCESS: MARKED PRESENT ✅✅✅`);
+      console.log(`   User: ${userId}`);
+      console.log(`   Subject: ${subjectId}`);
+      console.log(`   Day: ${day}`);
+      console.log(`   Distance: ${distance.toFixed(2)}m`);
+      
+      res.json({ 
+        success: true, 
+        message: 'Marked present', 
+        distance: distance.toFixed(2), 
+        day: day,
+        monthYear: monthYear 
+      });
     } else {
       // Mark absent - too far
       await attendanceRef.set({
         absent: admin.firestore.FieldValue.arrayUnion(day)
       }, { merge: true });
-      console.log(`❌ User ${userId} marked ABSENT for subject ${subjectId} on day ${day} - too far (${distance.toFixed(2)}m)`);
-      res.json({ success: true, message: 'Marked absent - too far', distance: distance.toFixed(2), day: day });
+      
+      console.log(`\n❌ MARKED ABSENT - TOO FAR ❌`);
+      console.log(`   User: ${userId}`);
+      console.log(`   Subject: ${subjectId}`);
+      console.log(`   Day: ${day}`);
+      console.log(`   Distance: ${distance.toFixed(2)}m (required: ${accuracyThreshold}m)`);
+      
+      res.json({ 
+        success: true, 
+        message: 'Marked absent - too far', 
+        distance: distance.toFixed(2), 
+        day: day,
+        monthYear: monthYear 
+      });
     }
 
   } catch (error) {
-    console.error('❌ Error receiving location:', error);
+    console.error('\n❌❌❌ ERROR IN /api/location ❌❌❌');
+    console.error('Error message:', error.message);
     console.error('Error stack:', error.stack);
     res.status(500).json({ error: 'Internal server error', details: error.message });
   }
@@ -531,6 +580,88 @@ app.post('/api/trigger-scan', async (req, res) => {
     queueSize: locationRequestQueue.size,
     istTime: getISTDate().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
   });
+});
+
+// Manual attendance check endpoint (for testing without FCM)
+app.post('/api/test-attendance', async (req, res) => {
+  try {
+    const { userId, subjectId } = req.body;
+    
+    if (!userId || !subjectId) {
+      return res.status(400).json({ error: 'Missing userId or subjectId' });
+    }
+
+    console.log(`\n🧪 MANUAL TEST: Checking attendance for user ${userId}, subject ${subjectId}`);
+
+    // Get subject data
+    const subjectDoc = await db
+      .collection('users')
+      .doc(userId)
+      .collection('subjects')
+      .doc(subjectId)
+      .get();
+
+    if (!subjectDoc.exists) {
+      return res.status(404).json({ error: 'Subject not found' });
+    }
+
+    const subjectData = subjectDoc.data();
+    const istDate = getISTDate();
+    const day = istDate.getDate();
+    const monthYear = `${istDate.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase()} ${istDate.getFullYear()}`;
+
+    console.log(`📅 Testing for: ${monthYear}, Day: ${day}`);
+    console.log(`🏫 Subject data:`, JSON.stringify(subjectData.location, null, 2));
+
+    await checkAndMarkAttendance(userId, subjectId, monthYear, subjectData, day);
+
+    res.json({ 
+      success: true, 
+      message: 'Attendance check completed',
+      day: day,
+      monthYear: monthYear
+    });
+  } catch (error) {
+    console.error('❌ Error in test-attendance:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Debug endpoint to check location data
+app.get('/api/debug-locations/:userId/:subjectId', async (req, res) => {
+  try {
+    const { userId, subjectId } = req.params;
+    
+    console.log(`\n🔍 DEBUG: Fetching locations for user ${userId}, subject ${subjectId}`);
+
+    const locationsSnapshot = await db
+      .collection('locations')
+      .where('userId', '==', userId)
+      .where('subjectId', '==', subjectId)
+      .orderBy('timestamp', 'desc')
+      .limit(5)
+      .get();
+
+    const locations = [];
+    locationsSnapshot.forEach(doc => {
+      const data = doc.data();
+      locations.push({
+        id: doc.id,
+        ...data,
+        timestamp: data.timestamp?.toDate().toISOString()
+      });
+    });
+
+    console.log(`📍 Found ${locations.length} locations`);
+
+    res.json({
+      count: locations.length,
+      locations: locations
+    });
+  } catch (error) {
+    console.error('❌ Error fetching locations:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Run scan at server start
