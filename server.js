@@ -360,37 +360,60 @@ async function scanAndQueueClasses() {
 
         classesFound++;
 
+        let startTime, endTime;
         const classTime = schedule[currentDay];
         
-        // FIX: Validate that classTime is a string
-        if (typeof classTime !== 'string') {
+        // Handle both formats: string "18:22-19:22" or array [{ start: "18:22", end: "19:22" }]
+        if (typeof classTime === 'string') {
+          // Old format: "18:22-19:22"
+          if (!classTime.includes('-')) {
+            console.log(`⚠️ Invalid time format for user ${userId}, subject ${subjectId}: ${classTime}`);
+            continue;
+          }
+
+          const timeParts = classTime.split('-');
+          if (timeParts.length !== 2) {
+            console.log(`⚠️ Invalid time range for user ${userId}, subject ${subjectId}: ${classTime}`);
+            continue;
+          }
+
+          startTime = timeParts[0].trim();
+          endTime = timeParts[1].trim();
+        } 
+        else if (Array.isArray(classTime) && classTime.length > 0) {
+          // New format: [{ start: "18:22", end: "19:22" }]
+          const timeSlot = classTime[0];
+          if (!timeSlot.start || !timeSlot.end) {
+            console.log(`⚠️ Invalid schedule object for user ${userId}, subject ${subjectId}: ${JSON.stringify(classTime)}`);
+            continue;
+          }
+          startTime = timeSlot.start;
+          endTime = timeSlot.end;
+        } 
+        else {
           console.log(`⚠️ Invalid schedule format for user ${userId}, subject ${subjectId}: ${JSON.stringify(classTime)}`);
           continue;
         }
-
-        // FIX: Validate format
-        if (!classTime.includes('-')) {
-          console.log(`⚠️ Invalid time format for user ${userId}, subject ${subjectId}: ${classTime}`);
-          continue;
-        }
-
-        const timeParts = classTime.split('-');
-        if (timeParts.length !== 2) {
-          console.log(`⚠️ Invalid time range for user ${userId}, subject ${subjectId}: ${classTime}`);
-          continue;
-        }
-
-        const [startTime, endTime] = timeParts;
         
-        // Validate time format
-        const timeRegex = /^\d{1,2}:\d{2}$/;
-        if (!timeRegex.test(startTime.trim()) || !timeRegex.test(endTime.trim())) {
-          console.log(`⚠️ Invalid time format for user ${userId}, subject ${subjectId}: ${classTime}`);
+        // Normalize time format: "18:5" -> "18:05"
+        const normalizeTime = (time) => {
+          const parts = time.split(':');
+          if (parts.length !== 2) return null;
+          const hours = parts[0].padStart(2, '0');
+          const minutes = parts[1].padStart(2, '0');
+          return `${hours}:${minutes}`;
+        };
+
+        startTime = normalizeTime(startTime);
+        endTime = normalizeTime(endTime);
+
+        if (!startTime || !endTime) {
+          console.log(`⚠️ Invalid time format for user ${userId}, subject ${subjectId}: ${JSON.stringify(classTime)}`);
           continue;
         }
 
-        const startMinutes = timeToMinutes(startTime.trim());
-        const endMinutes = timeToMinutes(endTime.trim());
+        const startMinutes = timeToMinutes(startTime);
+        const endMinutes = timeToMinutes(endTime);
         const middleMinutes = Math.floor((startMinutes + endMinutes) / 2);
 
         // Skip if class already finished
