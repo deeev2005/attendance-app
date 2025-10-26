@@ -453,15 +453,6 @@ app.post('/api/location', async (req, res) => {
       .collection('attendance')
       .doc(monthYear);
 
-    // Check if already marked
-    const attendanceDoc = await attendanceRef.get();
-    const attendanceData = attendanceDoc.data() || { present: [], absent: [] };
-
-    if (attendanceData.present?.includes(day) || attendanceData.absent?.includes(day)) {
-      console.log(`✅ Attendance already marked for day ${day}`);
-      return res.json({ success: true, message: 'Attendance already marked' });
-    }
-
     // Mark attendance based on distance
     if (distance <= accuracyThreshold) {
       // Mark present
