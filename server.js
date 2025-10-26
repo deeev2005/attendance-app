@@ -212,81 +212,92 @@ async function processQueue() {
   console.log(`\n⚙️ Processing queue at ${now.toLocaleTimeString()}`);
 
   try {
-    // Get pending entries where middleTime has passed
-    const queueSnapshot = await db
+    // FIX: Get all pending entries first, then filter in memory
+    const pendingSnapshot = await db
       .collection('attendance_queue')
       .where('status', '==', 'pending')
-      .where('middleTime', '<=', now)
       .get();
 
-    if (queueSnapshot.empty) {
+    // Filter entries where middleTime has passed
+    const dueEntries = pendingSnapshot.docs.filter(doc => {
+      const middleTime = doc.data().middleTime?.toDate();
+      return middleTime && middleTime <= now;
+    });
+
+    if (dueEntries.length === 0) {
       console.log('📭 No queue items to process');
-      return;
-    }
+    } else {
+      console.log(`📬 Found ${dueEntries.length} items to process`);
 
-    console.log(`📬 Found ${queueSnapshot.size} items to process`);
+      for (const queueDoc of dueEntries) {
+        const queueData = queueDoc.data();
+        const queueId = queueDoc.id;
 
-    for (const queueDoc of queueSnapshot.docs) {
-      const queueData = queueDoc.data();
-      const queueId = queueDoc.id;
+        console.log(`\n📍 Processing: ${queueId}`);
 
-      console.log(`\n📍 Processing: ${queueId}`);
+        // Send FCM location request
+        const sent = await sendLocationRequest(
+          queueData.fcmToken,
+          queueData.userId,
+          queueData.subjectId,
+          now.toLocaleString('default', { month: 'long' }).toLowerCase() + ' ' + now.getFullYear()
+        );
 
-      // Send FCM location request
-      const sent = await sendLocationRequest(
-        queueData.fcmToken,
-        queueData.userId,
-        queueData.subjectId,
-        now.toLocaleString('default', { month: 'long' }).toLowerCase() + ' ' + now.getFullYear()
-      );
-
-      if (sent) {
-        // Update status to location_sent
-        await db.collection('attendance_queue').doc(queueId).update({
-          status: 'location_sent',
-          locationRequestSentAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-      } else {
-        // Failed to send, mark as completed with error
-        await db.collection('attendance_queue').doc(queueId).update({
-          status: 'completed',
-          result: 'fcm_failed'
-        });
+        if (sent) {
+          // Update status to location_sent
+          await db.collection('attendance_queue').doc(queueId).update({
+            status: 'location_sent',
+            locationRequestSentAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+        } else {
+          // Failed to send, mark as completed with error
+          await db.collection('attendance_queue').doc(queueId).update({
+            status: 'completed',
+            result: 'fcm_failed'
+          });
+        }
       }
     }
 
-    // Process entries where location was sent 5+ minutes ago
+    // FIX: Get location_sent entries and filter in memory
     const fiveMinutesAgo = new Date(now.getTime() - 5 * 60 * 1000);
     const locationSentSnapshot = await db
       .collection('attendance_queue')
       .where('status', '==', 'location_sent')
-      .where('locationRequestSentAt', '<=', fiveMinutesAgo)
       .get();
 
-    console.log(`\n🔍 Checking attendance for ${locationSentSnapshot.size} items`);
+    // Filter entries where locationRequestSentAt was 5+ minutes ago
+    const readyToCheck = locationSentSnapshot.docs.filter(doc => {
+      const sentAt = doc.data().locationRequestSentAt?.toDate();
+      return sentAt && sentAt <= fiveMinutesAgo;
+    });
 
-    for (const queueDoc of locationSentSnapshot.docs) {
-      const queueData = queueDoc.data();
-      const queueId = queueDoc.id;
+    if (readyToCheck.length > 0) {
+      console.log(`\n🔍 Checking attendance for ${readyToCheck.length} items`);
 
-      const monthYear = now.toLocaleString('default', { month: 'long' }).toLowerCase() + ' ' + now.getFullYear();
+      for (const queueDoc of readyToCheck) {
+        const queueData = queueDoc.data();
+        const queueId = queueDoc.id;
 
-      const result = await checkAndMarkAttendance(
-        queueData.userId,
-        queueData.subjectId,
-        monthYear,
-        queueData.classLocation.latitude,
-        queueData.classLocation.longitude,
-        queueData.classLocation.accuracy,
-        now.getDate()
-      );
+        const monthYear = now.toLocaleString('default', { month: 'long' }).toLowerCase() + ' ' + now.getFullYear();
 
-      // Mark as completed
-      await db.collection('attendance_queue').doc(queueId).update({
-        status: 'completed',
-        result: result,
-        completedAt: admin.firestore.FieldValue.serverTimestamp()
-      });
+        const result = await checkAndMarkAttendance(
+          queueData.userId,
+          queueData.subjectId,
+          monthYear,
+          queueData.classLocation.latitude,
+          queueData.classLocation.longitude,
+          queueData.classLocation.accuracy,
+          now.getDate()
+        );
+
+        // Mark as completed
+        await db.collection('attendance_queue').doc(queueId).update({
+          status: 'completed',
+          result: result,
+          completedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+      }
     }
 
   } catch (error) {
@@ -350,8 +361,34 @@ async function scanAndQueueClasses() {
         classesFound++;
 
         const classTime = schedule[currentDay];
-        const [startTime, endTime] = classTime.split('-');
         
+        // FIX: Validate that classTime is a string
+        if (typeof classTime !== 'string') {
+          console.log(`⚠️ Invalid schedule format for user ${userId}, subject ${subjectId}: ${JSON.stringify(classTime)}`);
+          continue;
+        }
+
+        // FIX: Validate format
+        if (!classTime.includes('-')) {
+          console.log(`⚠️ Invalid time format for user ${userId}, subject ${subjectId}: ${classTime}`);
+          continue;
+        }
+
+        const timeParts = classTime.split('-');
+        if (timeParts.length !== 2) {
+          console.log(`⚠️ Invalid time range for user ${userId}, subject ${subjectId}: ${classTime}`);
+          continue;
+        }
+
+        const [startTime, endTime] = timeParts;
+        
+        // Validate time format
+        const timeRegex = /^\d{1,2}:\d{2}$/;
+        if (!timeRegex.test(startTime.trim()) || !timeRegex.test(endTime.trim())) {
+          console.log(`⚠️ Invalid time format for user ${userId}, subject ${subjectId}: ${classTime}`);
+          continue;
+        }
+
         const startMinutes = timeToMinutes(startTime.trim());
         const endMinutes = timeToMinutes(endTime.trim());
         const middleMinutes = Math.floor((startMinutes + endMinutes) / 2);
