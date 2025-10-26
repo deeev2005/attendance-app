@@ -403,15 +403,16 @@ app.post('/api/location', async (req, res) => {
     }
 
     // Store location in /locations collection
-    await db.collection('locations').add({
+    const locationRef = await db.collection('locations').add({
       userId,
       latitude,
       longitude,
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      timestamp: new Date(),
       subjectId
     });
 
-    console.log(`📍 Location received from user ${userId} for subject ${subjectId}`);
+    console.log(`📍 Location received and stored: ${locationRef.id}`);
+    console.log(`   User: ${userId}, Subject: ${subjectId}`);
 
     // Get subject data to fetch class location
     const subjectDoc = await db
