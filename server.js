@@ -446,7 +446,7 @@ async function setupLocationListener() {
           const subjectData = subjectDoc.data();
           const classLat = subjectData.location?.latitude;
           const classLon = subjectData.location?.longitude;
-          const accuracyThreshold = 30; // Fixed 30 meters threshold
+          const accuracyThreshold = subjectData.location?.accuracy || 50;
 
           if (!classLat || !classLon) {
             console.log(`⚠️ No class location set for subject ${subjectId}`);
