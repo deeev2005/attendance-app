@@ -396,23 +396,23 @@ async function scanAndQueueClasses() {
 // API endpoint to receive location from mobile app
 app.post('/api/location', async (req, res) => {
   try {
-    const { userId, latitude, longitude, subjectId, attendanceDocId } = req.body;
+    const { userId, latitude, longitude, subjectId, accuracy } = req.body;
 
     if (!userId || !latitude || !longitude || !subjectId) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
     // Store location in /locations collection
-    const locationRef = await db.collection('locations').add({
+    await db.collection('locations').add({
       userId,
       latitude,
       longitude,
-      timestamp: new Date(),
-      subjectId
+      subjectId,
+      accuracy: accuracy || null,
+      timestamp: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    console.log(`📍 Location received and stored: ${locationRef.id}`);
-    console.log(`   User: ${userId}, Subject: ${subjectId}`);
+    console.log(`📍 Location stored for user: ${userId}, subject: ${subjectId}`);
 
     // Get subject data to fetch class location
     const subjectDoc = await db
@@ -423,8 +423,8 @@ app.post('/api/location', async (req, res) => {
       .get();
 
     if (!subjectDoc.exists) {
-      console.log(`⚠️ Subject ${subjectId} not found for user ${userId}`);
-      return res.json({ success: true, message: 'Location stored but subject not found' });
+      console.log(`⚠️ Subject not found`);
+      return res.json({ success: true, message: 'Location stored' });
     }
 
     const subjectData = subjectDoc.data();
@@ -433,19 +433,24 @@ app.post('/api/location', async (req, res) => {
     const accuracyThreshold = subjectData.location?.accuracy || 50;
 
     if (!classLat || !classLon) {
-      console.log(`⚠️ No class location set for subject ${subjectId}`);
-      return res.json({ success: true, message: 'Location stored but class location not set' });
+      console.log(`⚠️ No class location set`);
+      return res.json({ success: true, message: 'Location stored' });
     }
 
     // Calculate distance
     const distance = calculateDistance(latitude, longitude, classLat, classLon);
     console.log(`📏 Distance: ${distance.toFixed(2)}m, Threshold: ${accuracyThreshold}m`);
 
-    // Get current date for attendance
+    // Get current IST date
     const istDate = getISTDate();
-    const day = istDate.getDate();
-    const monthYear = `${istDate.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase()} ${istDate.getFullYear()}`;
+    const dayNumber = istDate.getDate(); // This gives 1, 22, 25, etc.
+    const monthName = istDate.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase();
+    const year = istDate.getFullYear();
+    const monthYear = `${monthName} ${year}`; // e.g., "october 2025"
 
+    console.log(`📅 Day: ${dayNumber}, Month-Year: ${monthYear}`);
+
+    // Reference to attendance document
     const attendanceRef = db
       .collection('users')
       .doc(userId)
@@ -456,23 +461,35 @@ app.post('/api/location', async (req, res) => {
 
     // Mark attendance based on distance
     if (distance <= accuracyThreshold) {
-      // Mark present
+      // User is close - mark present
       await attendanceRef.set({
-        present: admin.firestore.FieldValue.arrayUnion(day)
+        present: admin.firestore.FieldValue.arrayUnion(dayNumber)
       }, { merge: true });
-      console.log(`✅ User ${userId} marked PRESENT for subject ${subjectId} on day ${day}`);
-      res.json({ success: true, message: 'Marked present', distance: distance.toFixed(2) });
+      
+      console.log(`✅ PRESENT marked - Day ${dayNumber} added to present array`);
+      return res.json({ 
+        success: true, 
+        status: 'present',
+        day: dayNumber,
+        distance: distance.toFixed(2)
+      });
     } else {
-      // Mark absent - too far
+      // User is far - mark absent
       await attendanceRef.set({
-        absent: admin.firestore.FieldValue.arrayUnion(day)
+        absent: admin.firestore.FieldValue.arrayUnion(dayNumber)
       }, { merge: true });
-      console.log(`❌ User ${userId} marked ABSENT for subject ${subjectId} on day ${day} - too far (${distance.toFixed(2)}m)`);
-      res.json({ success: true, message: 'Marked absent - too far', distance: distance.toFixed(2) });
+      
+      console.log(`❌ ABSENT marked - Day ${dayNumber} added to absent array`);
+      return res.json({ 
+        success: true, 
+        status: 'absent',
+        day: dayNumber,
+        distance: distance.toFixed(2)
+      });
     }
 
   } catch (error) {
-    console.error('❌ Error receiving location:', error);
+    console.error('❌ Error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
