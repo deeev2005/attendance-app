@@ -99,17 +99,27 @@ db.collection('locations').onSnapshot(async (snapshot) => {
         .collection('attendance')
         .doc(monthYear);
 
-      // Check and mark attendance
-      if (distance <= accuracyThreshold) {
-        await attendanceRef.set({
-          present: admin.firestore.FieldValue.arrayUnion(dayNumber)
-        }, { merge: true });
-        console.log(`✅ Marked PRESENT for ${userId}, subject ${subjectId} (Day ${dayNumber})`);
+      // Fetch current attendance first
+      const attendanceDoc = await attendanceRef.get();
+      const attendanceData = attendanceDoc.exists ? attendanceDoc.data() : {};
+      const presentDays = attendanceData.present || [];
+      const absentDays = attendanceData.absent || [];
+
+      // Only mark if day not already marked
+      if (!presentDays.includes(dayNumber) && !absentDays.includes(dayNumber)) {
+        if (distance <= accuracyThreshold) {
+          await attendanceRef.set({
+            present: admin.firestore.FieldValue.arrayUnion(dayNumber)
+          }, { merge: true });
+          console.log(`✅ Marked PRESENT for ${userId}, subject ${subjectId} (Day ${dayNumber})`);
+        } else {
+          await attendanceRef.set({
+            absent: admin.firestore.FieldValue.arrayUnion(dayNumber)
+          }, { merge: true });
+          console.log(`❌ Marked ABSENT for ${userId}, subject ${subjectId} (Day ${dayNumber})`);
+        }
       } else {
-        await attendanceRef.set({
-          absent: admin.firestore.FieldValue.arrayUnion(dayNumber)
-        }, { merge: true });
-        console.log(`❌ Marked ABSENT for ${userId}, subject ${subjectId} (Day ${dayNumber})`);
+        console.log(`ℹ️ Attendance already marked for ${userId}, subject ${subjectId} (Day ${dayNumber})`);
       }
     }
   });
@@ -170,7 +180,6 @@ async function scanAndQueueClasses() {
 // Dummy function for sending FCM
 async function sendLocationRequest(userId, subjectId) {
   console.log(`🚀 Sending FCM to request location for ${userId}, subject ${subjectId}`);
-  // Real FCM sending logic is already handled elsewhere in your original setup
 }
 
 // ==================================================================
