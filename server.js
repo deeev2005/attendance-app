@@ -212,92 +212,81 @@ async function processQueue() {
   console.log(`\n⚙️ Processing queue at ${now.toLocaleTimeString()}`);
 
   try {
-    // FIX: Get all pending entries first, then filter in memory
-    const pendingSnapshot = await db
+    // Get pending entries where middleTime has passed
+    const queueSnapshot = await db
       .collection('attendance_queue')
       .where('status', '==', 'pending')
+      .where('middleTime', '<=', now)
       .get();
 
-    // Filter entries where middleTime has passed
-    const dueEntries = pendingSnapshot.docs.filter(doc => {
-      const middleTime = doc.data().middleTime?.toDate();
-      return middleTime && middleTime <= now;
-    });
-
-    if (dueEntries.length === 0) {
+    if (queueSnapshot.empty) {
       console.log('📭 No queue items to process');
-    } else {
-      console.log(`📬 Found ${dueEntries.length} items to process`);
+      return;
+    }
 
-      for (const queueDoc of dueEntries) {
-        const queueData = queueDoc.data();
-        const queueId = queueDoc.id;
+    console.log(`📬 Found ${queueSnapshot.size} items to process`);
 
-        console.log(`\n📍 Processing: ${queueId}`);
+    for (const queueDoc of queueSnapshot.docs) {
+      const queueData = queueDoc.data();
+      const queueId = queueDoc.id;
 
-        // Send FCM location request
-        const sent = await sendLocationRequest(
-          queueData.fcmToken,
-          queueData.userId,
-          queueData.subjectId,
-          now.toLocaleString('default', { month: 'long' }).toLowerCase() + ' ' + now.getFullYear()
-        );
+      console.log(`\n📍 Processing: ${queueId}`);
 
-        if (sent) {
-          // Update status to location_sent
-          await db.collection('attendance_queue').doc(queueId).update({
-            status: 'location_sent',
-            locationRequestSentAt: admin.firestore.FieldValue.serverTimestamp()
-          });
-        } else {
-          // Failed to send, mark as completed with error
-          await db.collection('attendance_queue').doc(queueId).update({
-            status: 'completed',
-            result: 'fcm_failed'
-          });
-        }
+      // Send FCM location request
+      const sent = await sendLocationRequest(
+        queueData.fcmToken,
+        queueData.userId,
+        queueData.subjectId,
+        now.toLocaleString('default', { month: 'long' }).toLowerCase() + ' ' + now.getFullYear()
+      );
+
+      if (sent) {
+        // Update status to location_sent
+        await db.collection('attendance_queue').doc(queueId).update({
+          status: 'location_sent',
+          locationRequestSentAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+      } else {
+        // Failed to send, mark as completed with error
+        await db.collection('attendance_queue').doc(queueId).update({
+          status: 'completed',
+          result: 'fcm_failed'
+        });
       }
     }
 
-    // FIX: Get location_sent entries and filter in memory
+    // Process entries where location was sent 5+ minutes ago
     const fiveMinutesAgo = new Date(now.getTime() - 5 * 60 * 1000);
     const locationSentSnapshot = await db
       .collection('attendance_queue')
       .where('status', '==', 'location_sent')
+      .where('locationRequestSentAt', '<=', fiveMinutesAgo)
       .get();
 
-    // Filter entries where locationRequestSentAt was 5+ minutes ago
-    const readyToCheck = locationSentSnapshot.docs.filter(doc => {
-      const sentAt = doc.data().locationRequestSentAt?.toDate();
-      return sentAt && sentAt <= fiveMinutesAgo;
-    });
+    console.log(`\n🔍 Checking attendance for ${locationSentSnapshot.size} items`);
 
-    if (readyToCheck.length > 0) {
-      console.log(`\n🔍 Checking attendance for ${readyToCheck.length} items`);
+    for (const queueDoc of locationSentSnapshot.docs) {
+      const queueData = queueDoc.data();
+      const queueId = queueDoc.id;
 
-      for (const queueDoc of readyToCheck) {
-        const queueData = queueDoc.data();
-        const queueId = queueDoc.id;
+      const monthYear = now.toLocaleString('default', { month: 'long' }).toLowerCase() + ' ' + now.getFullYear();
 
-        const monthYear = now.toLocaleString('default', { month: 'long' }).toLowerCase() + ' ' + now.getFullYear();
+      const result = await checkAndMarkAttendance(
+        queueData.userId,
+        queueData.subjectId,
+        monthYear,
+        queueData.classLocation.latitude,
+        queueData.classLocation.longitude,
+        queueData.classLocation.accuracy,
+        now.getDate()
+      );
 
-        const result = await checkAndMarkAttendance(
-          queueData.userId,
-          queueData.subjectId,
-          monthYear,
-          queueData.classLocation.latitude,
-          queueData.classLocation.longitude,
-          queueData.classLocation.accuracy,
-          now.getDate()
-        );
-
-        // Mark as completed
-        await db.collection('attendance_queue').doc(queueId).update({
-          status: 'completed',
-          result: result,
-          completedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-      }
+      // Mark as completed
+      await db.collection('attendance_queue').doc(queueId).update({
+        status: 'completed',
+        result: result,
+        completedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
     }
 
   } catch (error) {
@@ -360,60 +349,11 @@ async function scanAndQueueClasses() {
 
         classesFound++;
 
-        let startTime, endTime;
         const classTime = schedule[currentDay];
+        const [startTime, endTime] = classTime.split('-');
         
-        // Handle both formats: string "18:22-19:22" or array [{ start: "18:22", end: "19:22" }]
-        if (typeof classTime === 'string') {
-          // Old format: "18:22-19:22"
-          if (!classTime.includes('-')) {
-            console.log(`⚠️ Invalid time format for user ${userId}, subject ${subjectId}: ${classTime}`);
-            continue;
-          }
-
-          const timeParts = classTime.split('-');
-          if (timeParts.length !== 2) {
-            console.log(`⚠️ Invalid time range for user ${userId}, subject ${subjectId}: ${classTime}`);
-            continue;
-          }
-
-          startTime = timeParts[0].trim();
-          endTime = timeParts[1].trim();
-        } 
-        else if (Array.isArray(classTime) && classTime.length > 0) {
-          // New format: [{ start: "18:22", end: "19:22" }]
-          const timeSlot = classTime[0];
-          if (!timeSlot.start || !timeSlot.end) {
-            console.log(`⚠️ Invalid schedule object for user ${userId}, subject ${subjectId}: ${JSON.stringify(classTime)}`);
-            continue;
-          }
-          startTime = timeSlot.start;
-          endTime = timeSlot.end;
-        } 
-        else {
-          console.log(`⚠️ Invalid schedule format for user ${userId}, subject ${subjectId}: ${JSON.stringify(classTime)}`);
-          continue;
-        }
-        
-        // Normalize time format: "18:5" -> "18:05"
-        const normalizeTime = (time) => {
-          const parts = time.split(':');
-          if (parts.length !== 2) return null;
-          const hours = parts[0].padStart(2, '0');
-          const minutes = parts[1].padStart(2, '0');
-          return `${hours}:${minutes}`;
-        };
-
-        startTime = normalizeTime(startTime);
-        endTime = normalizeTime(endTime);
-
-        if (!startTime || !endTime) {
-          console.log(`⚠️ Invalid time format for user ${userId}, subject ${subjectId}: ${JSON.stringify(classTime)}`);
-          continue;
-        }
-
-        const startMinutes = timeToMinutes(startTime);
-        const endMinutes = timeToMinutes(endTime);
+        const startMinutes = timeToMinutes(startTime.trim());
+        const endMinutes = timeToMinutes(endTime.trim());
         const middleMinutes = Math.floor((startMinutes + endMinutes) / 2);
 
         // Skip if class already finished
@@ -506,7 +446,7 @@ async function setupLocationListener() {
           const subjectData = subjectDoc.data();
           const classLat = subjectData.location?.latitude;
           const classLon = subjectData.location?.longitude;
-          const accuracyThreshold = subjectData.location?.accuracy || 50;
+          const accuracyThreshold = 30; // Fixed 30 meters threshold
 
           if (!classLat || !classLon) {
             console.log(`⚠️ No class location set for subject ${subjectId}`);
