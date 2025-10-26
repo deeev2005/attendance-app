@@ -306,21 +306,15 @@ async function scanAndQueueClasses() {
   try {
     // Clean up old completed queue entries (older than 2 days)
     const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
-    
-    // Get all entries and filter in memory to avoid index requirement
-    const allEntriesSnapshot = await db
+    const oldEntriesSnapshot = await db
       .collection('attendance_queue')
+      .where('createdAt', '<=', twoDaysAgo)
       .get();
 
-    const oldEntries = allEntriesSnapshot.docs.filter(doc => {
-      const createdAt = doc.data().createdAt?.toDate();
-      return createdAt && createdAt <= twoDaysAgo;
-    });
-
-    if (oldEntries.length > 0) {
-      console.log(`🗑️ Cleaning up ${oldEntries.length} old queue entries`);
+    if (!oldEntriesSnapshot.empty) {
+      console.log(`🗑️ Cleaning up ${oldEntriesSnapshot.size} old queue entries`);
       const batch = db.batch();
-      oldEntries.forEach(doc => batch.delete(doc.ref));
+      oldEntriesSnapshot.docs.forEach(doc => batch.delete(doc.ref));
       await batch.commit();
     }
 
