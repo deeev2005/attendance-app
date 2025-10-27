@@ -201,9 +201,15 @@ async function scanAndQueueClasses() {
   console.log(`📊 Summary: ${totalQueued} classes queued for today`);
 }
 
-// Dummy function for sending FCM
+// Function for sending FCM
 async function sendLocationRequest(userId, subjectId) {
   console.log(`🚀 Sending FCM to request location for ${userId}, subject ${subjectId}`);
+  
+  // TODO: Implement actual FCM push notification here
+  // For now, this is a placeholder for the FCM logic
+  
+  // After FCM is sent, the mobile app should respond by writing to 'locations' collection
+  // with structure: { userId, subjectId, latitude, longitude, timestamp }
 }
 
 // ==================================================================
@@ -219,6 +225,34 @@ app.get('/health', (req, res) => {
 // 🟢 Added ping route for cron job
 app.get('/ping', (req, res) => {
   res.status(200).send('OK');
+});
+
+// ==================================================================
+// 📍 NEW ENDPOINT: Submit Location from Mobile App
+// ==================================================================
+app.post('/submit-location', async (req, res) => {
+  try {
+    const { userId, subjectId, latitude, longitude } = req.body;
+
+    if (!userId || !subjectId || !latitude || !longitude) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Store location in Firestore
+    await db.collection('locations').add({
+      userId,
+      subjectId,
+      latitude,
+      longitude,
+      timestamp: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    console.log(`✅ Location stored for user ${userId}, subject ${subjectId}`);
+    res.json({ success: true, message: 'Location submitted successfully' });
+  } catch (error) {
+    console.error('❌ Error storing location:', error);
+    res.status(500).json({ error: 'Failed to store location' });
+  }
 });
 
 // ==================================================================
