@@ -126,7 +126,7 @@ db.collection('locations').onSnapshot(async (snapshot) => {
 });
 
 // ==================================================================
-// 🧭 CLASS SCANNING & QUEUE LOGIC (unchanged)
+// 🧭 CLASS SCANNING & QUEUE LOGIC (unchanged except auto repeat)
 // ==================================================================
 const locationRequestQueue = new Map();
 
@@ -183,7 +183,7 @@ async function sendLocationRequest(userId, subjectId) {
 }
 
 // ==================================================================
-// 🩺 HEALTH CHECK ENDPOINTS
+// 🩺 HEALTH CHECK ENDPOINT
 // ==================================================================
 app.get('/health', (req, res) => {
   res.json({
@@ -192,6 +192,9 @@ app.get('/health', (req, res) => {
   });
 });
 
+// ==================================================================
+// 🏓 PING ENDPOINT FOR CRON JOB
+// ==================================================================
 app.get('/ping', (req, res) => {
   res.status(200).send('OK');
 });
@@ -204,11 +207,7 @@ app.listen(PORT, async () => {
   console.log('🚀 Starting server...');
   console.log('🇮🇳 Using Indian Standard Time (IST)');
   await scanAndQueueClasses();
+  setInterval(scanAndQueueClasses, 60 * 1000); // 👈 Added: re-scan every 1 minute
   console.log(`🚀 Server running on port ${PORT}`);
   console.log('👂 Listening to Firestore "locations" collection for new entries...');
-  
-  // Check for classes every minute
-  setInterval(async () => {
-    await scanAndQueueClasses();
-  }, 60000); // 60000ms = 1 minute
 });
