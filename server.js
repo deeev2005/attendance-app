@@ -55,9 +55,9 @@ db.collection('locations').onSnapshot(async (snapshot) => {
   snapshot.docChanges().forEach(async (change) => {
     if (change.type === 'added') {
       const data = change.doc.data();
-      const { userId, subjectId, latitude, longitude } = data;
+      const { userId, subjectId, latitude, longitude, timestamp } = data;
 
-      if (!userId || !subjectId || !latitude || !longitude) {
+      if (!userId || !subjectId || !latitude || !longitude || !timestamp) {
         console.log('⚠️ Missing required fields in new location entry');
         return;
       }
@@ -88,7 +88,13 @@ db.collection('locations').onSnapshot(async (snapshot) => {
       }
 
       const distance = calculateDistance(latitude, longitude, classLat, classLon);
-      const istDate = getISTDate();
+      
+      // ✅ USE TIMESTAMP FROM DOCUMENT INSTEAD OF SERVER TIME
+      const locationDate = timestamp.toDate();
+      const istOffset = 5.5 * 60 * 60 * 1000;
+      const utcTime = locationDate.getTime() + (locationDate.getTimezoneOffset() * 60 * 1000);
+      const istDate = new Date(utcTime + istOffset);
+      
       const dayNumber = istDate.getDate();
       const monthName = istDate.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase();
       const year = istDate.getFullYear();
