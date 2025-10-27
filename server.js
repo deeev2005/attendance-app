@@ -159,7 +159,21 @@ async function scanAndQueueClasses() {
       );
 
       if (matchingDayKey) {
-        const startTime = schedule[matchingDayKey].startTime;
+        let startTime;
+
+        // ✅ Handle array or object schedule format
+        const scheduleEntry = schedule[matchingDayKey];
+        if (Array.isArray(scheduleEntry) && scheduleEntry.length > 0) {
+          startTime = scheduleEntry[0].start;
+        } else if (scheduleEntry && scheduleEntry.start) {
+          startTime = scheduleEntry.start;
+        }
+
+        if (!startTime) {
+          console.log(`⚠️ No valid start time found for ${subjectId} on ${matchingDayKey}`);
+          continue;
+        }
+
         const [hours, minutes] = startTime.split(':').map(Number);
         const classStart = new Date(istDate);
         classStart.setHours(hours, minutes, 0, 0);
