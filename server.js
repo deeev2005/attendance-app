@@ -23,10 +23,11 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-// Utility: Get current IST date
+// ✅ FIXED: Get current IST date properly (no double offset)
 function getISTDate() {
-  const utcDate = new Date();
-  return new Date(utcDate.getTime() + 5.5 * 60 * 60 * 1000);
+  return new Date(
+    new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })
+  );
 }
 
 // Utility: Calculate distance between coordinates (in meters)
