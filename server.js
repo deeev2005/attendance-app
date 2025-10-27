@@ -193,13 +193,6 @@ app.get('/health', (req, res) => {
 });
 
 // ==================================================================
-// 🟢 NEW PING ROUTE FOR CRON OR UPTIME ROBOT
-// ==================================================================
-app.get('/ping', (req, res) => {
-  res.status(200).send('OK');
-});
-
-// ==================================================================
 // 🚀 SERVER STARTUP
 // ==================================================================
 const PORT = process.env.PORT || 10000;
@@ -210,3 +203,8 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log('👂 Listening to Firestore "locations" collection for new entries...');
 });
+
+
+
+
+This is the cleanest way — very fast, no Firebase or logic loaded.
