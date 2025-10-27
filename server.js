@@ -23,11 +23,13 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-// ✅ FIXED: Get current IST date properly (no double offset)
+// ✅ FIXED: Get current IST date properly
 function getISTDate() {
-  return new Date(
-    new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })
-  );
+  const now = new Date();
+  // Convert to IST by adding 5 hours 30 minutes offset
+  const istOffset = 5.5 * 60 * 60 * 1000; // IST is UTC+5:30
+  const utcTime = now.getTime() + (now.getTimezoneOffset() * 60 * 1000);
+  return new Date(utcTime + istOffset);
 }
 
 // Utility: Calculate distance between coordinates (in meters)
