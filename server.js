@@ -183,13 +183,17 @@ async function sendLocationRequest(userId, subjectId) {
 }
 
 // ==================================================================
-// 🩺 HEALTH CHECK ENDPOINT
+// 🩺 HEALTH CHECK ENDPOINTS
 // ==================================================================
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     timeIST: getISTDate().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
   });
+});
+
+app.get('/ping', (req, res) => {
+  res.status(200).send('OK');
 });
 
 // ==================================================================
@@ -202,9 +206,9 @@ app.listen(PORT, async () => {
   await scanAndQueueClasses();
   console.log(`🚀 Server running on port ${PORT}`);
   console.log('👂 Listening to Firestore "locations" collection for new entries...');
+  
+  // Check for classes every minute
+  setInterval(async () => {
+    await scanAndQueueClasses();
+  }, 60000); // 60000ms = 1 minute
 });
-
-
-
-
-This is the cleanest way — very fast, no Firebase or logic loaded.
