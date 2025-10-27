@@ -153,8 +153,13 @@ async function scanAndQueueClasses() {
       const subjectData = subjectDoc.data();
       const schedule = subjectData.schedule || {};
 
-      if (schedule[currentDay]) {
-        const startTime = schedule[currentDay].startTime;
+      // ✅ Case-insensitive match for day name
+      const matchingDayKey = Object.keys(schedule).find(
+        key => key.toLowerCase() === currentDay
+      );
+
+      if (matchingDayKey) {
+        const startTime = schedule[matchingDayKey].startTime;
         const [hours, minutes] = startTime.split(':').map(Number);
         const classStart = new Date(istDate);
         classStart.setHours(hours, minutes, 0, 0);
