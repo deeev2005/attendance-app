@@ -205,11 +205,43 @@ async function scanAndQueueClasses() {
 async function sendLocationRequest(userId, subjectId) {
   console.log(`🚀 Sending FCM to request location for ${userId}, subject ${subjectId}`);
   
-  // TODO: Implement actual FCM push notification here
-  // For now, this is a placeholder for the FCM logic
-  
-  // After FCM is sent, the mobile app should respond by writing to 'locations' collection
-  // with structure: { userId, subjectId, latitude, longitude, timestamp }
+  try {
+    // Get user's FCM token from Firestore
+    const userDoc = await db.collection('users').doc(userId).get();
+    
+    if (!userDoc.exists) {
+      console.log(`❌ User ${userId} not found`);
+      return;
+    }
+
+    const userData = userDoc.data();
+    const fcmToken = userData.fcmToken;
+
+    if (!fcmToken) {
+      console.log(`❌ No FCM token found for user ${userId}`);
+      return;
+    }
+
+    // Send FCM notification
+    const message = {
+      token: fcmToken,
+      notification: {
+        title: 'Class Started - Submit Attendance',
+        body: 'Please share your location to mark attendance'
+      },
+      data: {
+        type: 'LOCATION_REQUEST',
+        userId: userId,
+        subjectId: subjectId,
+        timestamp: Date.now().toString()
+      }
+    };
+
+    const response = await admin.messaging().send(message);
+    console.log(`✅ FCM sent successfully to ${userId}:`, response);
+  } catch (error) {
+    console.error(`❌ Error sending FCM to ${userId}:`, error.message);
+  }
 }
 
 // ==================================================================
