@@ -135,8 +135,10 @@ const locationRequestQueue = new Map();
 
 async function scanAndQueueClasses() {
   const istDate = getISTDate();
-  const currentDay = istDate.toLocaleString('en-US', { weekday: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase();
-  console.log(`\n🔍 Scanning for classes on ${currentDay} - ${istDate.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })}`);
+  const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const currentDay = dayNames[istDate.getDay()];
+  const timeString = istDate.toTimeString().split(' ')[0];
+  console.log(`\n🔍 Scanning for classes on ${currentDay} - ${timeString}`);
 
   const usersSnapshot = await db.collection('users').get();
   let totalQueued = 0;
