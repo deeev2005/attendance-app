@@ -26,7 +26,8 @@ const db = admin.firestore();
 // ✅ FIXED: Get current IST date properly
 function getISTDate() {
   const now = new Date();
-  const istOffset = 5.5 * 60 * 60 * 1000;
+  // Convert to IST by adding 5 hours 30 minutes offset
+  const istOffset = 5.5 * 60 * 60 * 1000; // IST is UTC+5:30
   const utcTime = now.getTime() + (now.getTimezoneOffset() * 60 * 1000);
   return new Date(utcTime + istOffset);
 }
@@ -54,23 +55,14 @@ db.collection('locations').onSnapshot(async (snapshot) => {
   snapshot.docChanges().forEach(async (change) => {
     if (change.type === 'added') {
       const data = change.doc.data();
-      const { userId, subjectId, latitude, longitude, timestamp } = data;
+      const { userId, subjectId, latitude, longitude } = data;
 
-      if (!userId || !subjectId || !latitude || !longitude || !timestamp) {
+      if (!userId || !subjectId || !latitude || !longitude) {
         console.log('⚠️ Missing required fields in new location entry');
         return;
       }
 
       console.log(`📍 New location received for ${userId}, subject ${subjectId}`);
-
-      // 🕒 Use Firestore timestamp field instead of server time
-      const istDate = new Date(timestamp.toDate());
-      const dayNumber = istDate.getDate();
-      const monthName = istDate
-        .toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' })
-        .toLowerCase();
-      const year = istDate.getFullYear();
-      const monthYear = `${monthName} ${year}`;
 
       // Fetch subject info
       const subjectDoc = await db
@@ -96,6 +88,11 @@ db.collection('locations').onSnapshot(async (snapshot) => {
       }
 
       const distance = calculateDistance(latitude, longitude, classLat, classLon);
+      const istDate = getISTDate();
+      const dayNumber = istDate.getDate();
+      const monthName = istDate.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase();
+      const year = istDate.getFullYear();
+      const monthYear = `${monthName} ${year}`;
 
       const attendanceRef = db
         .collection('users')
@@ -111,7 +108,7 @@ db.collection('locations').onSnapshot(async (snapshot) => {
       const presentDays = attendanceData.present || [];
       const absentDays = attendanceData.absent || [];
 
-      // ✅ Only mark if day not already marked
+      // Only mark if day not already marked
       if (!presentDays.includes(dayNumber) && !absentDays.includes(dayNumber)) {
         if (distance <= accuracyThreshold) {
           await attendanceRef.set({
@@ -156,12 +153,15 @@ async function scanAndQueueClasses() {
       const subjectData = subjectDoc.data();
       const schedule = subjectData.schedule || {};
 
+      // ✅ Case-insensitive match for day name
       const matchingDayKey = Object.keys(schedule).find(
         key => key.toLowerCase() === currentDay
       );
 
       if (matchingDayKey) {
         let startTime;
+
+        // ✅ Handle array or object schedule format
         const scheduleEntry = schedule[matchingDayKey];
         if (Array.isArray(scheduleEntry) && scheduleEntry.length > 0) {
           startTime = scheduleEntry[0].start;
@@ -206,6 +206,7 @@ async function sendLocationRequest(userId, subjectId) {
   console.log(`🚀 Sending FCM to request location for ${userId}, subject ${subjectId}`);
   
   try {
+    // Get user's FCM token from Firestore
     const userDoc = await db.collection('users').doc(userId).get();
     
     if (!userDoc.exists) {
@@ -221,6 +222,7 @@ async function sendLocationRequest(userId, subjectId) {
       return;
     }
 
+    // Send FCM notification
     const message = {
       token: fcmToken,
       notification: {
@@ -252,6 +254,7 @@ app.get('/health', (req, res) => {
   });
 });
 
+// 🟢 Added ping route for cron job
 app.get('/ping', (req, res) => {
   res.status(200).send('OK');
 });
@@ -261,18 +264,19 @@ app.get('/ping', (req, res) => {
 // ==================================================================
 app.post('/submit-location', async (req, res) => {
   try {
-    const { userId, subjectId, latitude, longitude, timestamp } = req.body;
+    const { userId, subjectId, latitude, longitude } = req.body;
 
-    if (!userId || !subjectId || !latitude || !longitude || !timestamp) {
+    if (!userId || !subjectId || !latitude || !longitude) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
+    // Store location in Firestore
     await db.collection('locations').add({
       userId,
       subjectId,
       latitude,
       longitude,
-      timestamp: new Date(timestamp) // 🔹 store given timestamp
+      timestamp: admin.firestore.FieldValue.serverTimestamp()
     });
 
     console.log(`✅ Location stored for user ${userId}, subject ${subjectId}`);
@@ -295,4 +299,5 @@ app.listen(PORT, async () => {
   console.log('👂 Listening to Firestore "locations" collection for new entries...');
 });
 
+// 🕒 Added: check for scheduled classes every 1 minute
 setInterval(scanAndQueueClasses, 60 * 1000);
