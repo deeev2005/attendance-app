@@ -160,7 +160,6 @@ async function scanAndQueueClasses() {
       const middleTimeISTString = middleTime.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
       const now = getISTDate();
-      const dailyKey = `${userId}_${subjectId}_${istDate.toDateString()}`;
 
       // ✅ Avoid duplicates for same user+subject for same day
       const existingSchedule = await db.collection('schedule')
@@ -212,7 +211,7 @@ db.collection('schedule').onSnapshot(async (snapshot) => {
 });
 
 // ==================================================================
-// 🚀 Send FCM
+// 🚀 Send FCM (silent push only)
 // ==================================================================
 async function sendLocationRequest(userId, subjectId) {
   try {
@@ -230,12 +229,24 @@ async function sendLocationRequest(userId, subjectId) {
         subjectId,
         timestamp: Date.now().toString()
       },
-      android: { priority: 'high' },
-      apns: { headers: { 'apns-priority': '10' }, payload: { aps: { contentAvailable: true } } }
+      android: {
+        priority: 'high',
+        notification: undefined // ✅ prevent visible notification on Android
+      },
+      apns: {
+        headers: {
+          'apns-priority': '5' // ✅ low priority → silent
+        },
+        payload: {
+          aps: {
+            'content-available': 1 // ✅ correct silent key
+          }
+        }
+      }
     };
 
     await admin.messaging().send(message);
-    console.log(`✅ FCM sent successfully to ${userId} for subject ${subjectId}`);
+    console.log(`✅ Silent FCM sent successfully to ${userId} for subject ${subjectId}`);
   } catch (err) {
     console.error(`❌ Error sending FCM to ${userId}:`, err.message);
   }
