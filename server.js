@@ -174,17 +174,31 @@ async function scanAndQueueClasses() {
 // ==================================================================
 // 👂 OBSERVE SCHEDULE COLLECTION & SEND FCM AT END TIME
 // ==================================================================
+const processedSchedules = new Set(); // ✅ Track already processed schedules
+
 db.collection('schedule').onSnapshot(async (snapshot) => {
   const now = getISTDate();
   snapshot.docChanges().forEach(async (change) => {
     if (change.type === 'added') {
+      const docId = change.doc.id;
+      
+      // ✅ Skip if already processed
+      if (processedSchedules.has(docId)) return;
+      
       const data = change.doc.data();
       const { userId, subjectId, endTime } = data;
+      
+      // ✅ Only process if endTime exists (ignore old middleTime entries)
       if (!userId || !subjectId || !endTime) return;
 
       const endDate = endTime.toDate();
       const diff = endDate.getTime() - now.getTime();
+      
+      // ✅ Skip if time has already passed
       if (diff <= 0) return;
+
+      // ✅ Mark as processed
+      processedSchedules.add(docId);
 
       console.log(`🕒 Queuing FCM for end of class ${subjectId} for ${userId} (in ${Math.round(diff / 60000)} mins)`);
 
