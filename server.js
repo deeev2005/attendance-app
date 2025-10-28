@@ -129,12 +129,9 @@ db.collection('locations').onSnapshot(async (snapshot) => {
 });
 
 // ==================================================================
-// 🧭 CLASS SCANNING & QUEUE LOGIC - FIXED
+// 🧭 SCAN CLASSES & STORE IN SCHEDULE COLLECTION
 // ==================================================================
-const locationRequestQueue = new Map();
-const sentNotifications = new Set(); // ✅ Track already sent notifications
-
-async function scanAndQueueClasses() {
+async function scanAndStoreSchedule() {
   const istDate = getISTDate();
   const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
   const currentDay = dayNames[istDate.getDay()];
@@ -142,7 +139,7 @@ async function scanAndQueueClasses() {
   console.log(`\n🔍 Scanning for classes on ${currentDay} - ${timeString}`);
 
   const usersSnapshot = await db.collection('users').get();
-  let totalQueued = 0;
+  let totalStored = 0;
 
   for (const userDoc of usersSnapshot.docs) {
     const userId = userDoc.id;
@@ -189,52 +186,63 @@ async function scanAndQueueClasses() {
         
         const middleTime = new Date((classStart.getTime() + classEnd.getTime()) / 2);
 
-        const now = getISTDate();
-        const queueKey = `${userId}_${subjectId}`;
-        
-        // ✅ Create daily unique key to prevent duplicate notifications
-        const dailyKey = `${userId}_${subjectId}_${istDate.toDateString()}`;
-        
-        // ✅ FIXED: Skip if already sent today OR already queued OR middle time has passed
-        if (sentNotifications.has(dailyKey) || locationRequestQueue.has(queueKey) || now >= middleTime) {
-          continue;
+        // ✅ Create unique document ID to prevent duplicates
+        const scheduleDocId = `${userId}_${subjectId}_${istDate.toDateString()}`;
+
+        // ✅ Check if already exists in schedule collection
+        const existingSchedule = await db.collection('schedule').doc(scheduleDocId).get();
+
+        if (!existingSchedule.exists) {
+          // ✅ Store in schedule collection
+          await db.collection('schedule').doc(scheduleDocId).set({
+            userId: userId,
+            subjectId: subjectId,
+            timestamp: admin.firestore.Timestamp.now(),
+            middleTime: admin.firestore.Timestamp.fromDate(middleTime)
+          });
+
+          console.log(`📅 Stored schedule for ${userId}, subject ${subjectId}, middle time: ${middleTime.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`);
+          totalStored++;
         }
-        
-        const timeDiff = middleTime.getTime() - now.getTime();
-
-        console.log(`🕒 Queuing class ${subjectId} for ${userId} (middle time in ${Math.round(timeDiff / 60000)} mins)`);
-
-        const timeoutId = setTimeout(async () => {
-          console.log(`\n📋 Triggering FCM for user ${userId}, subject ${subjectId}`);
-          await sendLocationRequest(userId, subjectId);
-          sentNotifications.add(dailyKey); // ✅ Mark as sent
-          locationRequestQueue.delete(queueKey);
-        }, timeDiff);
-
-        locationRequestQueue.set(queueKey, timeoutId);
-        totalQueued++;
       }
     }
   }
 
-  console.log(`📊 Summary: ${totalQueued} classes queued for today`);
+  console.log(`📊 Summary: ${totalStored} new schedules stored`);
 }
 
-// ✅ Clear sent notifications at midnight IST
-function scheduleMidnightReset() {
-  const now = getISTDate();
-  const tomorrow = new Date(now);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  tomorrow.setHours(0, 0, 0, 0);
-  
-  const timeUntilMidnight = tomorrow.getTime() - now.getTime();
-  
-  setTimeout(() => {
-    console.log('🌙 Midnight reset: Clearing sent notifications');
-    sentNotifications.clear();
-    scheduleMidnightReset(); // Schedule next reset
-  }, timeUntilMidnight);
-}
+// ==================================================================
+// 🟢 REALTIME LISTENER FOR SCHEDULE COLLECTION
+// ==================================================================
+db.collection('schedule').onSnapshot(async (snapshot) => {
+  snapshot.docChanges().forEach(async (change) => {
+    if (change.type === 'added') {
+      const data = change.doc.data();
+      const { userId, subjectId, middleTime } = data;
+
+      if (!userId || !subjectId || !middleTime) {
+        console.log('⚠️ Missing required fields in schedule entry');
+        return;
+      }
+
+      const middleTimeDate = middleTime.toDate();
+      const now = getISTDate();
+      const timeDiff = middleTimeDate.getTime() - now.getTime();
+
+      // ✅ Only schedule if middle time is in the future
+      if (timeDiff > 0) {
+        console.log(`🕒 Scheduling FCM for ${userId}, subject ${subjectId} in ${Math.round(timeDiff / 60000)} mins`);
+
+        setTimeout(async () => {
+          console.log(`\n📋 Triggering FCM for user ${userId}, subject ${subjectId}`);
+          await sendLocationRequest(userId, subjectId);
+        }, timeDiff);
+      } else {
+        console.log(`⏭️ Middle time already passed for ${userId}, subject ${subjectId}`);
+      }
+    }
+  });
+});
 
 // Function for sending FCM (Silent/Invisible notification)
 async function sendLocationRequest(userId, subjectId) {
@@ -338,11 +346,11 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, async () => {
   console.log('🚀 Starting server...');
   console.log('🇮🇳 Using Indian Standard Time (IST)');
-  await scanAndQueueClasses();
-  scheduleMidnightReset(); // ✅ Start midnight reset scheduler
+  await scanAndStoreSchedule();
   console.log(`🚀 Server running on port ${PORT}`);
   console.log('👂 Listening to Firestore "locations" collection for new entries...');
+  console.log('👂 Listening to Firestore "schedule" collection for FCM triggers...');
 });
 
-// 🕒 Added: check for scheduled classes every 1 minute
-setInterval(scanAndQueueClasses, 60 * 1000);
+// 🕒 Scan for scheduled classes every 1 minute
+setInterval(scanAndStoreSchedule, 60 * 1000);
