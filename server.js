@@ -132,8 +132,7 @@ db.collection('locations').onSnapshot(async (snapshot) => {
 // 🧭 CLASS SCANNING & QUEUE LOGIC - FIXED
 // ==================================================================
 const locationRequestQueue = new Map();
-const sentNotifications = new Set(); // Track already sent notifications
-const processedClasses = new Set(); // ✅ Track classes already processed today
+const sentNotifications = new Set(); // ✅ Track already sent notifications
 
 async function scanAndQueueClasses() {
   const istDate = getISTDate();
@@ -155,7 +154,7 @@ async function scanAndQueueClasses() {
       const subjectData = subjectDoc.data();
       const schedule = subjectData.schedule || {};
 
-      // Case-insensitive match for day name
+      // ✅ Case-insensitive match for day name
       const matchingDayKey = Object.keys(schedule).find(
         key => key.toLowerCase() === currentDay
       );
@@ -163,7 +162,7 @@ async function scanAndQueueClasses() {
       if (matchingDayKey) {
         let startTime, endTime;
 
-        // Handle array or object schedule format
+        // ✅ Handle array or object schedule format
         const scheduleEntry = schedule[matchingDayKey];
         if (Array.isArray(scheduleEntry) && scheduleEntry.length > 0) {
           startTime = scheduleEntry[0].start;
@@ -178,7 +177,7 @@ async function scanAndQueueClasses() {
           continue;
         }
 
-        // Calculate middle of the class
+        // ✅ Calculate middle of the class
         const [startHours, startMinutes] = startTime.split(':').map(Number);
         const [endHours, endMinutes] = endTime.split(':').map(Number);
         
@@ -191,18 +190,13 @@ async function scanAndQueueClasses() {
         const middleTime = new Date((classStart.getTime() + classEnd.getTime()) / 2);
 
         const now = getISTDate();
+        const queueKey = `${userId}_${subjectId}`;
         
-        // ✅ Create daily unique key to prevent duplicate processing
-        const dailyProcessKey = `${userId}_${subjectId}_${istDate.toDateString()}`;
+        // ✅ Create daily unique key to prevent duplicate notifications
+        const dailyKey = `${userId}_${subjectId}_${istDate.toDateString()}`;
         
-        // ✅ Skip if already processed today (queued or sent)
-        if (processedClasses.has(dailyProcessKey)) {
-          continue;
-        }
-        
-        // Skip if middle time has already passed
-        if (now >= middleTime) {
-          console.log(`⏭️ Skipping ${subjectId} - middle time already passed`);
+        // ✅ FIXED: Skip if already sent today OR already queued OR middle time has passed
+        if (sentNotifications.has(dailyKey) || locationRequestQueue.has(queueKey) || now >= middleTime) {
           continue;
         }
         
@@ -210,17 +204,14 @@ async function scanAndQueueClasses() {
 
         console.log(`🕒 Queuing class ${subjectId} for ${userId} (middle time in ${Math.round(timeDiff / 60000)} mins)`);
 
-        // ✅ Mark as processed immediately when queuing
-        processedClasses.add(dailyProcessKey);
-
         const timeoutId = setTimeout(async () => {
           console.log(`\n📋 Triggering FCM for user ${userId}, subject ${subjectId}`);
           await sendLocationRequest(userId, subjectId);
-          sentNotifications.add(dailyProcessKey); // Mark as sent
-          locationRequestQueue.delete(`${userId}_${subjectId}`);
+          sentNotifications.add(dailyKey); // ✅ Mark as sent
+          locationRequestQueue.delete(queueKey);
         }, timeDiff);
 
-        locationRequestQueue.set(`${userId}_${subjectId}`, timeoutId);
+        locationRequestQueue.set(queueKey, timeoutId);
         totalQueued++;
       }
     }
@@ -229,7 +220,7 @@ async function scanAndQueueClasses() {
   console.log(`📊 Summary: ${totalQueued} classes queued for today`);
 }
 
-// ✅ Clear all tracking sets at midnight IST
+// ✅ Clear sent notifications at midnight IST
 function scheduleMidnightReset() {
   const now = getISTDate();
   const tomorrow = new Date(now);
@@ -239,16 +230,15 @@ function scheduleMidnightReset() {
   const timeUntilMidnight = tomorrow.getTime() - now.getTime();
   
   setTimeout(() => {
-    console.log('🌙 Midnight reset: Clearing all tracking sets');
+    console.log('🌙 Midnight reset: Clearing sent notifications');
     sentNotifications.clear();
-    processedClasses.clear(); // ✅ Clear processed classes too
     scheduleMidnightReset(); // Schedule next reset
   }, timeUntilMidnight);
 }
 
-// ✅ Completely silent/invisible FCM notification
+// Function for sending FCM (Silent/Invisible notification)
 async function sendLocationRequest(userId, subjectId) {
-  console.log(`🚀 Sending SILENT FCM to request location for ${userId}, subject ${subjectId}`);
+  console.log(`🚀 Sending FCM to request location for ${userId}, subject ${subjectId}`);
   
   try {
     // Get user's FCM token from Firestore
@@ -267,7 +257,7 @@ async function sendLocationRequest(userId, subjectId) {
       return;
     }
 
-    // ✅ COMPLETELY SILENT notification - NO notification field at all
+    // ✅ Send SILENT FCM notification (no notification field, only data)
     const message = {
       token: fcmToken,
       data: {
@@ -277,7 +267,7 @@ async function sendLocationRequest(userId, subjectId) {
         timestamp: Date.now().toString()
       },
       android: {
-        priority: 'high',
+        priority: 'high'
       },
       apns: {
         headers: {
@@ -285,14 +275,14 @@ async function sendLocationRequest(userId, subjectId) {
         },
         payload: {
           aps: {
-            contentAvailable: true,
+            contentAvailable: true
           }
         }
       }
     };
 
     const response = await admin.messaging().send(message);
-    console.log(`✅ Silent FCM sent successfully to ${userId}:`, response);
+    console.log(`✅ FCM sent successfully to ${userId}:`, response);
   } catch (error) {
     console.error(`❌ Error sending FCM to ${userId}:`, error.message);
   }
@@ -308,12 +298,13 @@ app.get('/health', (req, res) => {
   });
 });
 
+// 🟢 Added ping route for cron job
 app.get('/ping', (req, res) => {
   res.status(200).send('OK');
 });
 
 // ==================================================================
-// 📍 ENDPOINT: Submit Location from Mobile App
+// 📍 NEW ENDPOINT: Submit Location from Mobile App
 // ==================================================================
 app.post('/submit-location', async (req, res) => {
   try {
@@ -353,5 +344,5 @@ app.listen(PORT, async () => {
   console.log('👂 Listening to Firestore "locations" collection for new entries...');
 });
 
-// 🕒 Check for scheduled classes every 1 minute
+// 🕒 Added: check for scheduled classes every 1 minute
 setInterval(scanAndQueueClasses, 60 * 1000);
