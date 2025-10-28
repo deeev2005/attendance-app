@@ -26,7 +26,8 @@ const db = admin.firestore();
 // ✅ FIXED: Get current IST date properly
 function getISTDate() {
   const now = new Date();
-  const istOffset = 5.5 * 60 * 60 * 1000;
+  // Convert to IST by adding 5 hours 30 minutes offset
+  const istOffset = 5.5 * 60 * 60 * 1000; // IST is UTC+5:30
   const utcTime = now.getTime() + (now.getTimezoneOffset() * 60 * 1000);
   return new Date(utcTime + istOffset);
 }
@@ -101,11 +102,13 @@ db.collection('locations').onSnapshot(async (snapshot) => {
         .collection('attendance')
         .doc(monthYear);
 
+      // Fetch current attendance first
       const attendanceDoc = await attendanceRef.get();
       const attendanceData = attendanceDoc.exists ? attendanceDoc.data() : {};
       const presentDays = attendanceData.present || [];
       const absentDays = attendanceData.absent || [];
 
+      // Only mark if day not already marked
       if (!presentDays.includes(dayNumber) && !absentDays.includes(dayNumber)) {
         if (distance <= accuracyThreshold) {
           await attendanceRef.set({
@@ -126,7 +129,7 @@ db.collection('locations').onSnapshot(async (snapshot) => {
 });
 
 // ==================================================================
-// 🧭 CLASS SCANNING & QUEUE LOGIC (modified to send FCM at midpoint)
+// 🧭 CLASS SCANNING & QUEUE LOGIC
 // ==================================================================
 const locationRequestQueue = new Map();
 
@@ -150,6 +153,7 @@ async function scanAndQueueClasses() {
       const subjectData = subjectDoc.data();
       const schedule = subjectData.schedule || {};
 
+      // ✅ Case-insensitive match for day name
       const matchingDayKey = Object.keys(schedule).find(
         key => key.toLowerCase() === currentDay
       );
@@ -157,40 +161,48 @@ async function scanAndQueueClasses() {
       if (matchingDayKey) {
         let startTime, endTime;
 
+        // ✅ Handle array or object schedule format
         const scheduleEntry = schedule[matchingDayKey];
         if (Array.isArray(scheduleEntry) && scheduleEntry.length > 0) {
           startTime = scheduleEntry[0].start;
           endTime = scheduleEntry[0].end;
-        } else if (scheduleEntry && scheduleEntry.start && scheduleEntry.end) {
+        } else if (scheduleEntry && scheduleEntry.start) {
           startTime = scheduleEntry.start;
           endTime = scheduleEntry.end;
         }
 
         if (!startTime || !endTime) {
-          console.log(`⚠️ Missing start or end time for ${subjectId} on ${matchingDayKey}`);
+          console.log(`⚠️ No valid start/end time found for ${subjectId} on ${matchingDayKey}`);
           continue;
         }
 
+        // ✅ Calculate middle of the class
         const [startHours, startMinutes] = startTime.split(':').map(Number);
         const [endHours, endMinutes] = endTime.split(':').map(Number);
-
+        
         const classStart = new Date(istDate);
         classStart.setHours(startHours, startMinutes, 0, 0);
-
+        
         const classEnd = new Date(istDate);
         classEnd.setHours(endHours, endMinutes, 0, 0);
-
-        const classMid = new Date((classStart.getTime() + classEnd.getTime()) / 2);
+        
+        const middleTime = new Date((classStart.getTime() + classEnd.getTime()) / 2);
 
         const now = getISTDate();
-        if (now < classMid) {
+        if (now < middleTime) {
           const queueKey = `${userId}_${subjectId}`;
-          const timeDiff = classMid.getTime() - now.getTime();
+          
+          // ✅ Skip if already queued
+          if (locationRequestQueue.has(queueKey)) {
+            continue;
+          }
+          
+          const timeDiff = middleTime.getTime() - now.getTime();
 
-          console.log(`🕒 Queuing FCM for middle of class ${subjectId} for ${userId} (in ${Math.round(timeDiff / 60000)} mins)`);
+          console.log(`🕒 Queuing class ${subjectId} for ${userId} (middle time in ${Math.round(timeDiff / 60000)} mins)`);
 
           const timeoutId = setTimeout(async () => {
-            console.log(`\n📋 Triggering MID-CLASS FCM for user ${userId}, subject ${subjectId}`);
+            console.log(`\n📋 Triggering FCM for user ${userId}, subject ${subjectId}`);
             await sendLocationRequest(userId, subjectId);
             locationRequestQueue.delete(queueKey);
           }, timeDiff);
@@ -202,29 +214,17 @@ async function scanAndQueueClasses() {
     }
   }
 
-  console.log(`📊 Summary: ${totalQueued} mid-class FCMs queued for today`);
+  console.log(`📊 Summary: ${totalQueued} classes queued for today`);
 }
 
-// ==================================================================
-// ✅ Function for sending FCM (unchanged, has duplicate prevention)
-// ==================================================================
+// Function for sending FCM (Silent/Invisible notification)
 async function sendLocationRequest(userId, subjectId) {
   console.log(`🚀 Sending FCM to request location for ${userId}, subject ${subjectId}`);
-
+  
   try {
-    const logRef = db.collection('fcmLogs').doc(`${userId}_${subjectId}`);
-    const logSnap = await logRef.get();
-    const now = new Date();
-
-    if (logSnap.exists) {
-      const lastSent = logSnap.data().timestamp.toDate();
-      if (now - lastSent < 10 * 60 * 1000) {
-        console.log(`⏳ Skipping duplicate FCM for ${userId}, subject ${subjectId}`);
-        return;
-      }
-    }
-
+    // Get user's FCM token from Firestore
     const userDoc = await db.collection('users').doc(userId).get();
+    
     if (!userDoc.exists) {
       console.log(`❌ User ${userId} not found`);
       return;
@@ -232,31 +232,38 @@ async function sendLocationRequest(userId, subjectId) {
 
     const userData = userDoc.data();
     const fcmToken = userData.fcmToken;
+
     if (!fcmToken) {
       console.log(`❌ No FCM token found for user ${userId}`);
       return;
     }
 
+    // ✅ Send SILENT FCM notification (no notification field, only data)
     const message = {
       token: fcmToken,
-      notification: {
-        title: 'Class Midpoint - Submit Attendance',
-        body: 'Please share your location to mark attendance'
-      },
       data: {
         type: 'LOCATION_REQUEST',
         userId: userId,
         subjectId: subjectId,
         timestamp: Date.now().toString()
+      },
+      android: {
+        priority: 'high'
+      },
+      apns: {
+        headers: {
+          'apns-priority': '10'
+        },
+        payload: {
+          aps: {
+            contentAvailable: true
+          }
+        }
       }
     };
 
     const response = await admin.messaging().send(message);
     console.log(`✅ FCM sent successfully to ${userId}:`, response);
-
-    await logRef.set({
-      timestamp: admin.firestore.Timestamp.fromDate(now)
-    });
   } catch (error) {
     console.error(`❌ Error sending FCM to ${userId}:`, error.message);
   }
@@ -288,6 +295,7 @@ app.post('/submit-location', async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
+    // Store location in Firestore
     await db.collection('locations').add({
       userId,
       subjectId,
@@ -316,5 +324,5 @@ app.listen(PORT, async () => {
   console.log('👂 Listening to Firestore "locations" collection for new entries...');
 });
 
-// 🕒 Check for scheduled classes every 1 minute
+// 🕒 Added: check for scheduled classes every 1 minute
 setInterval(scanAndQueueClasses, 60 * 1000);
