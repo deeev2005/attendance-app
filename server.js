@@ -151,6 +151,7 @@ async function scanAndQueueClasses() {
       const classEnd = new Date(istDate);
       classEnd.setHours(endH, endM, 0, 0);
 
+      // ✅ Only middle notification remains
       const middleTime = new Date((classStart.getTime() + classEnd.getTime()) / 2);
       const middleTimeISTString = middleTime.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
@@ -162,6 +163,7 @@ async function scanAndQueueClasses() {
 
       if (!existingSchedule.empty) continue;
 
+      // ✅ Only one schedule (middle) entry
       await db.collection('schedule').add({
         userId,
         subjectId,
@@ -170,7 +172,7 @@ async function scanAndQueueClasses() {
         date: istDate.toDateString()
       });
 
-      console.log(`🗓️ Added to schedule: ${userId} - ${subjectId} @ ${middleTimeISTString}`);
+      console.log(`🕒 Scheduled MID-CLASS FCM for ${userId} - ${subjectId} @ ${middleTimeISTString}`);
     }
   }
 }
@@ -190,10 +192,10 @@ db.collection('schedule').onSnapshot(async (snapshot) => {
       const diff = middleDate.getTime() - now.getTime();
       if (diff <= 0) return;
 
-      console.log(`🕒 Queuing FCM for middle of class ${subjectId} for ${userId} (in ${Math.round(diff / 60000)} mins)`);
+      console.log(`🕒 Queuing MID-CLASS FCM for ${subjectId} for ${userId} (in ${Math.round(diff / 60000)} mins)`);
 
       setTimeout(async () => {
-        console.log(`\n📋 Triggering FCM for user ${userId}, subject ${subjectId}`);
+        console.log(`\n📋 Triggering MID-CLASS FCM for user ${userId}, subject ${subjectId}`);
         await sendLocationRequest(userId, subjectId);
       }, diff);
     }
@@ -221,7 +223,7 @@ async function sendLocationRequest(userId, subjectId) {
       },
       android: {
         priority: 'high',
-        notification: undefined // ✅ prevents visible notification
+        notification: undefined // ✅ silent push (no visible notif)
       },
       apns: {
         headers: {
@@ -236,7 +238,7 @@ async function sendLocationRequest(userId, subjectId) {
     };
 
     await admin.messaging().send(message);
-    console.log(`✅ Silent FCM sent successfully to ${userId} for subject ${subjectId}`);
+    console.log(`✅ Silent FCM (mid-class) sent successfully to ${userId} for subject ${subjectId}`);
   } catch (err) {
     console.error(`❌ Error sending FCM to ${userId}:`, err.message);
   }
