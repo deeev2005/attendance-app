@@ -131,17 +131,20 @@ async function scanAndQueueClasses() {
       );
       if (!matchingDayKey) continue;
 
-      let endTime;
+      let startTime, endTime;
       const scheduleEntry = schedule[matchingDayKey];
       if (Array.isArray(scheduleEntry) && scheduleEntry.length > 0) {
+        startTime = scheduleEntry[0].start;
         endTime = scheduleEntry[0].end;
-      } else if (scheduleEntry && scheduleEntry.end) {
+      } else if (scheduleEntry && scheduleEntry.start) {
+        startTime = scheduleEntry.start;
         endTime = scheduleEntry.end;
       }
 
-      if (!endTime) continue;
+      if (!startTime || !endTime) continue;
 
       const [endH, endM] = endTime.split(':').map(Number);
+
       const classEnd = new Date(istDate);
       classEnd.setHours(endH, endM, 0, 0);
 
@@ -183,12 +186,10 @@ db.collection('schedule').onSnapshot(async (snapshot) => {
       const diff = endDate.getTime() - now.getTime();
       if (diff <= 0) return;
 
-      console.log(`🕒 Queuing 2 FCMs for END of class ${subjectId} for ${userId} (in ${Math.round(diff / 60000)} mins)`);
+      console.log(`🕒 Queuing FCM for end of class ${subjectId} for ${userId} (in ${Math.round(diff / 60000)} mins)`);
 
       setTimeout(async () => {
-        console.log(`\n📋 Triggering 2 FCMs for user ${userId}, subject ${subjectId} at END of class`);
-        await sendLocationRequest(userId, subjectId);
-        await new Promise(res => setTimeout(res, 3000)); // small 3s gap
+        console.log(`\n📋 Triggering FCM for user ${userId}, subject ${subjectId}`);
         await sendLocationRequest(userId, subjectId);
       }, diff);
     }
