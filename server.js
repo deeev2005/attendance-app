@@ -172,34 +172,24 @@ async function scanAndQueueClasses() {
 }
 
 // ==================================================================
-// 👂 OBSERVE SCHEDULE COLLECTION & SEND FCM AT END TIME
+// 👂 OBSERVE SCHEDULE COLLECTION & SEND FCM AT END TIME (ONLY ONCE)
 // ==================================================================
-const processedSchedules = new Set();
-
 db.collection('schedule').onSnapshot(async (snapshot) => {
   const now = getISTDate();
   snapshot.docChanges().forEach(async (change) => {
     if (change.type === 'added') {
-      const docId = change.doc.id;
-      
-      if (processedSchedules.has(docId)) return;
-      
       const data = change.doc.data();
       const { userId, subjectId, endTime } = data;
-      
       if (!userId || !subjectId || !endTime) return;
 
       const endDate = endTime.toDate();
       const diff = endDate.getTime() - now.getTime();
-      
       if (diff <= 0) return;
 
-      processedSchedules.add(docId);
+      console.log(`🕒 FCM will be sent exactly at end of class ${subjectId} for ${userId} (in ${Math.round(diff / 60000)} mins)`);
 
-      console.log(`🕒 Queuing FCM for end of class ${subjectId} for ${userId} (in ${Math.round(diff / 60000)} mins)`);
-
+      // Send FCM exactly at end time (only one FCM)
       setTimeout(async () => {
-        console.log(`\n📋 Triggering FCM for user ${userId}, subject ${subjectId}`);
         await sendLocationRequest(userId, subjectId);
       }, diff);
     }
@@ -207,7 +197,7 @@ db.collection('schedule').onSnapshot(async (snapshot) => {
 });
 
 // ==================================================================
-// 🚀 Send FCM at End Time
+// 🚀 Send FCM (SILENT PUSH ONLY)
 // ==================================================================
 async function sendLocationRequest(userId, subjectId) {
   try {
@@ -226,17 +216,23 @@ async function sendLocationRequest(userId, subjectId) {
         timestamp: Date.now().toString()
       },
       android: {
-        priority: 'high'
+        priority: 'high',
+        notification: undefined // ✅ prevents visible notification
       },
       apns: {
         headers: {
-          'apns-priority': '10'
+          'apns-priority': '5'
+        },
+        payload: {
+          aps: {
+            'content-available': 1
+          }
         }
       }
     };
 
     await admin.messaging().send(message);
-    console.log(`✅ FCM sent successfully to ${userId} for subject ${subjectId}`);
+    console.log(`✅ FCM sent successfully at end time to ${userId} for subject ${subjectId}`);
   } catch (err) {
     console.error(`❌ Error sending FCM to ${userId}:`, err.message);
   }
@@ -282,7 +278,7 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, async () => {
   console.log('🚀 Starting server...');
   console.log('🇮🇳 Using Indian Standard Time (IST)');
-  await scanAndQueueClasses();
+  await scanAndQueueClasses(); // initial scan
   console.log(`✅ Server running on port ${PORT}`);
 });
 
