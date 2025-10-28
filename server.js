@@ -236,9 +236,9 @@ function scheduleMidnightReset() {
   }, timeUntilMidnight);
 }
 
-// ✅ MODIFIED: Function for sending INVISIBLE FCM (Data-only notification)
+// ✅ MODIFIED: Function for sending INVISIBLE/SILENT FCM (NO visible notification)
 async function sendLocationRequest(userId, subjectId) {
-  console.log(`🚀 Sending INVISIBLE FCM to request location for ${userId}, subject ${subjectId}`);
+  console.log(`🚀 Sending SILENT FCM to request location for ${userId}, subject ${subjectId}`);
   
   try {
     // Get user's FCM token from Firestore
@@ -257,11 +257,11 @@ async function sendLocationRequest(userId, subjectId) {
       return;
     }
 
-    // ✅ INVISIBLE NOTIFICATION: Only data payload, NO notification field
+    // ✅ SILENT/INVISIBLE FCM - Only data payload, NO notification field
     const message = {
       token: fcmToken,
       data: {
-        type: 'LOCATION_REQUEST',
+        type: 'location_request',
         userId: userId,
         subjectId: subjectId,
         timestamp: Date.now().toString()
@@ -282,7 +282,7 @@ async function sendLocationRequest(userId, subjectId) {
     };
 
     const response = await admin.messaging().send(message);
-    console.log(`✅ INVISIBLE FCM sent successfully to ${userId}:`, response);
+    console.log(`✅ SILENT FCM sent successfully to ${userId}:`, response);
   } catch (error) {
     console.error(`❌ Error sending FCM to ${userId}:`, error.message);
   }
