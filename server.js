@@ -109,8 +109,6 @@ db.collection('locations').onSnapshot(async (snapshot) => {
 // ==================================================================
 // 🧭 CLASS SCANNING & SCHEDULE CREATION
 // ==================================================================
-const sentNotifications = new Set();
-
 async function scanAndQueueClasses() {
   const istDate = getISTDate();
   const currentDay = istDate.toLocaleString('en-US', { weekday: 'long' }).toLowerCase();
@@ -148,20 +146,14 @@ async function scanAndQueueClasses() {
       const [startH, startM] = startTime.split(':').map(Number);
       const [endH, endM] = endTime.split(':').map(Number);
 
-      // ✅ Create IST-based Date objects
       const classStart = new Date(istDate);
       classStart.setHours(startH, startM, 0, 0);
       const classEnd = new Date(istDate);
       classEnd.setHours(endH, endM, 0, 0);
 
       const middleTime = new Date((classStart.getTime() + classEnd.getTime()) / 2);
-
-      // ✅ Format IST middle time string
       const middleTimeISTString = middleTime.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
-      const now = getISTDate();
-
-      // ✅ Avoid duplicates for same user+subject for same day
       const existingSchedule = await db.collection('schedule')
         .where('userId', '==', userId)
         .where('subjectId', '==', subjectId)
@@ -170,7 +162,6 @@ async function scanAndQueueClasses() {
 
       if (!existingSchedule.empty) continue;
 
-      // ✅ Store in "schedule" collection
       await db.collection('schedule').add({
         userId,
         subjectId,
@@ -197,7 +188,6 @@ db.collection('schedule').onSnapshot(async (snapshot) => {
 
       const middleDate = middleTime.toDate();
       const diff = middleDate.getTime() - now.getTime();
-
       if (diff <= 0) return;
 
       console.log(`🕒 Queuing FCM for middle of class ${subjectId} for ${userId} (in ${Math.round(diff / 60000)} mins)`);
@@ -211,7 +201,7 @@ db.collection('schedule').onSnapshot(async (snapshot) => {
 });
 
 // ==================================================================
-// 🚀 Send FCM (silent push only)
+// 🚀 Send FCM (SILENT PUSH ONLY)
 // ==================================================================
 async function sendLocationRequest(userId, subjectId) {
   try {
@@ -231,15 +221,15 @@ async function sendLocationRequest(userId, subjectId) {
       },
       android: {
         priority: 'high',
-        notification: undefined // ✅ prevent visible notification on Android
+        notification: undefined // ✅ prevents visible notification
       },
       apns: {
         headers: {
-          'apns-priority': '5' // ✅ low priority → silent
+          'apns-priority': '5'
         },
         payload: {
           aps: {
-            'content-available': 1 // ✅ correct silent key
+            'content-available': 1
           }
         }
       }
@@ -296,5 +286,4 @@ app.listen(PORT, async () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
 
-// Re-scan every minute
 setInterval(scanAndQueueClasses, 60 * 1000);
