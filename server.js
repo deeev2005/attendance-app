@@ -131,29 +131,21 @@ async function scanAndQueueClasses() {
       );
       if (!matchingDayKey) continue;
 
-      let startTime, endTime;
+      let endTime;
       const scheduleEntry = schedule[matchingDayKey];
       if (Array.isArray(scheduleEntry) && scheduleEntry.length > 0) {
-        startTime = scheduleEntry[0].start;
         endTime = scheduleEntry[0].end;
-      } else if (scheduleEntry && scheduleEntry.start) {
-        startTime = scheduleEntry.start;
+      } else if (scheduleEntry && scheduleEntry.end) {
         endTime = scheduleEntry.end;
       }
 
-      if (!startTime || !endTime) continue;
+      if (!endTime) continue;
 
-      const [startH, startM] = startTime.split(':').map(Number);
       const [endH, endM] = endTime.split(':').map(Number);
-
-      const classStart = new Date(istDate);
-      classStart.setHours(startH, startM, 0, 0);
       const classEnd = new Date(istDate);
       classEnd.setHours(endH, endM, 0, 0);
 
-      // ✅ Only middle notification remains
-      const middleTime = new Date((classStart.getTime() + classEnd.getTime()) / 2);
-      const middleTimeISTString = middleTime.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+      const endTimeISTString = classEnd.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
       const existingSchedule = await db.collection('schedule')
         .where('userId', '==', userId)
@@ -163,39 +155,40 @@ async function scanAndQueueClasses() {
 
       if (!existingSchedule.empty) continue;
 
-      // ✅ Only one schedule (middle) entry
       await db.collection('schedule').add({
         userId,
         subjectId,
-        timestamp: `timestamp${middleTimeISTString}`,
-        middleTime: admin.firestore.Timestamp.fromDate(middleTime),
+        timestamp: `timestamp${endTimeISTString}`,
+        endTime: admin.firestore.Timestamp.fromDate(classEnd),
         date: istDate.toDateString()
       });
 
-      console.log(`🕒 Scheduled MID-CLASS FCM for ${userId} - ${subjectId} @ ${middleTimeISTString}`);
+      console.log(`🗓️ Added to schedule: ${userId} - ${subjectId} @ ${endTimeISTString}`);
     }
   }
 }
 
 // ==================================================================
-// 👂 OBSERVE SCHEDULE COLLECTION & SEND FCM AT MIDDLE TIME
+// 👂 OBSERVE SCHEDULE COLLECTION & SEND FCM AT END TIME
 // ==================================================================
 db.collection('schedule').onSnapshot(async (snapshot) => {
   const now = getISTDate();
   snapshot.docChanges().forEach(async (change) => {
     if (change.type === 'added') {
       const data = change.doc.data();
-      const { userId, subjectId, middleTime } = data;
-      if (!userId || !subjectId || !middleTime) return;
+      const { userId, subjectId, endTime } = data;
+      if (!userId || !subjectId || !endTime) return;
 
-      const middleDate = middleTime.toDate();
-      const diff = middleDate.getTime() - now.getTime();
+      const endDate = endTime.toDate();
+      const diff = endDate.getTime() - now.getTime();
       if (diff <= 0) return;
 
-      console.log(`🕒 Queuing MID-CLASS FCM for ${subjectId} for ${userId} (in ${Math.round(diff / 60000)} mins)`);
+      console.log(`🕒 Queuing 2 FCMs for END of class ${subjectId} for ${userId} (in ${Math.round(diff / 60000)} mins)`);
 
       setTimeout(async () => {
-        console.log(`\n📋 Triggering MID-CLASS FCM for user ${userId}, subject ${subjectId}`);
+        console.log(`\n📋 Triggering 2 FCMs for user ${userId}, subject ${subjectId} at END of class`);
+        await sendLocationRequest(userId, subjectId);
+        await new Promise(res => setTimeout(res, 3000)); // small 3s gap
         await sendLocationRequest(userId, subjectId);
       }, diff);
     }
@@ -223,7 +216,7 @@ async function sendLocationRequest(userId, subjectId) {
       },
       android: {
         priority: 'high',
-        notification: undefined // ✅ silent push (no visible notif)
+        notification: undefined // ✅ prevents visible notification
       },
       apns: {
         headers: {
@@ -238,7 +231,7 @@ async function sendLocationRequest(userId, subjectId) {
     };
 
     await admin.messaging().send(message);
-    console.log(`✅ Silent FCM (mid-class) sent successfully to ${userId} for subject ${subjectId}`);
+    console.log(`✅ Silent FCM sent successfully to ${userId} for subject ${subjectId}`);
   } catch (err) {
     console.error(`❌ Error sending FCM to ${userId}:`, err.message);
   }
