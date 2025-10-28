@@ -174,15 +174,19 @@ async function scanAndStoreSchedule() {
           continue;
         }
 
-        // ✅ Calculate middle of the class
+        // ✅ Calculate middle of the class IN IST
         const [startHours, startMinutes] = startTime.split(':').map(Number);
         const [endHours, endMinutes] = endTime.split(':').map(Number);
         
-        const classStart = new Date(istDate);
-        classStart.setHours(startHours, startMinutes, 0, 0);
+        // Get current IST date components
+        const currentISTDate = getISTDate();
+        const year = currentISTDate.getFullYear();
+        const month = currentISTDate.getMonth();
+        const day = currentISTDate.getDate();
         
-        const classEnd = new Date(istDate);
-        classEnd.setHours(endHours, endMinutes, 0, 0);
+        // Create dates in IST timezone
+        const classStart = new Date(year, month, day, startHours, startMinutes, 0, 0);
+        const classEnd = new Date(year, month, day, endHours, endMinutes, 0, 0);
         
         const middleTime = new Date((classStart.getTime() + classEnd.getTime()) / 2);
 
