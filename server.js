@@ -174,7 +174,7 @@ async function scanAndQueueClasses() {
 // ==================================================================
 // 👂 OBSERVE SCHEDULE COLLECTION & SEND FCM AT END TIME
 // ==================================================================
-const processedSchedules = new Set(); // ✅ Track already processed schedules
+const processedSchedules = new Set();
 
 db.collection('schedule').onSnapshot(async (snapshot) => {
   const now = getISTDate();
@@ -182,22 +182,18 @@ db.collection('schedule').onSnapshot(async (snapshot) => {
     if (change.type === 'added') {
       const docId = change.doc.id;
       
-      // ✅ Skip if already processed
       if (processedSchedules.has(docId)) return;
       
       const data = change.doc.data();
       const { userId, subjectId, endTime } = data;
       
-      // ✅ Only process if endTime exists (ignore old middleTime entries)
       if (!userId || !subjectId || !endTime) return;
 
       const endDate = endTime.toDate();
       const diff = endDate.getTime() - now.getTime();
       
-      // ✅ Skip if time has already passed
       if (diff <= 0) return;
 
-      // ✅ Mark as processed
       processedSchedules.add(docId);
 
       console.log(`🕒 Queuing FCM for end of class ${subjectId} for ${userId} (in ${Math.round(diff / 60000)} mins)`);
@@ -211,7 +207,7 @@ db.collection('schedule').onSnapshot(async (snapshot) => {
 });
 
 // ==================================================================
-// 🚀 Send FCM (SILENT PUSH ONLY)
+// 🚀 Send FCM at End Time
 // ==================================================================
 async function sendLocationRequest(userId, subjectId) {
   try {
@@ -230,23 +226,17 @@ async function sendLocationRequest(userId, subjectId) {
         timestamp: Date.now().toString()
       },
       android: {
-        priority: 'high',
-        notification: undefined // ✅ prevents visible notification
+        priority: 'high'
       },
       apns: {
         headers: {
-          'apns-priority': '5'
-        },
-        payload: {
-          aps: {
-            'content-available': 1
-          }
+          'apns-priority': '10'
         }
       }
     };
 
     await admin.messaging().send(message);
-    console.log(`✅ Silent FCM sent successfully to ${userId} for subject ${subjectId}`);
+    console.log(`✅ FCM sent successfully to ${userId} for subject ${subjectId}`);
   } catch (err) {
     console.error(`❌ Error sending FCM to ${userId}:`, err.message);
   }
@@ -292,7 +282,7 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, async () => {
   console.log('🚀 Starting server...');
   console.log('🇮🇳 Using Indian Standard Time (IST)');
-  await scanAndQueueClasses(); // initial scan
+  await scanAndQueueClasses();
   console.log(`✅ Server running on port ${PORT}`);
 });
 
