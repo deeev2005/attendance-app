@@ -234,8 +234,7 @@ async function sendLocationRequest(userId, subjectId) {
         },
         payload: {
           aps: {
-            'content-available': 1,
-            sound: ''
+            'content-available': 1
           }
         }
       }
