@@ -2,6 +2,8 @@ const express = require('express');
 const admin = require('firebase-admin');
 const fs = require('fs');
 const path = require('path');
+const { google } = require('googleapis');
+const https = require('https');
 
 const app = express();
 app.use(express.json());
@@ -46,19 +48,42 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
 }
 
 // ==================================================================
-// 🔁 LISTENER FOR LOCATIONS (attendance marking)
+// 🔁 LISTENER FOR LOCATIONS (attendance marking with schedule lookup)
 // ==================================================================
 db.collection('locations').onSnapshot(async (snapshot) => {
   snapshot.docChanges().forEach(async (change) => {
     if (change.type === 'added') {
       const data = change.doc.data();
-      const { userId, subjectId, latitude, longitude } = data;
-      if (!userId || !subjectId || !latitude || !longitude) return;
+      const { uid, latitude, longitude, timestamp } = data;
+      if (!uid || !latitude || !longitude) return;
 
-      console.log(`📍 New location received for ${userId}, subject ${subjectId}`);
+      console.log(`📍 New location received for ${uid}`);
+
+      // Get the timestamp of the location
+      const locationTime = timestamp ? timestamp.toDate() : new Date();
+      const oneMinuteAgo = new Date(locationTime.getTime() - 60 * 1000);
+      const oneMinuteAfter = new Date(locationTime.getTime() + 60 * 1000);
+
+      // Search schedule collection for this user within 1 minute timeframe
+      const scheduleSnapshot = await db.collection('schedule')
+        .where('userId', '==', uid)
+        .where('endTime', '>=', admin.firestore.Timestamp.fromDate(oneMinuteAgo))
+        .where('endTime', '<=', admin.firestore.Timestamp.fromDate(oneMinuteAfter))
+        .get();
+
+      if (scheduleSnapshot.empty) {
+        console.log(`⚠️ No scheduled class found for ${uid} in the timeframe`);
+        return;
+      }
+
+      // Get the first matching schedule (should be only one)
+      const scheduleDoc = scheduleSnapshot.docs[0];
+      const subjectId = scheduleDoc.data().subjectId;
+
+      console.log(`📚 Found subject ${subjectId} for user ${uid}`);
 
       const subjectDoc = await db
-        .collection('users').doc(userId)
+        .collection('users').doc(uid)
         .collection('subjects').doc(subjectId).get();
 
       if (!subjectDoc.exists) return;
@@ -78,7 +103,7 @@ db.collection('locations').onSnapshot(async (snapshot) => {
       const monthYear = `${monthName} ${year}`;
 
       const attendanceRef = db.collection('users')
-        .doc(userId)
+        .doc(uid)
         .collection('subjects')
         .doc(subjectId)
         .collection('attendance')
@@ -94,12 +119,12 @@ db.collection('locations').onSnapshot(async (snapshot) => {
           await attendanceRef.set({
             present: admin.firestore.FieldValue.arrayUnion(dayNumber)
           }, { merge: true });
-          console.log(`✅ Marked PRESENT for ${userId}, subject ${subjectId}`);
+          console.log(`✅ Marked PRESENT for ${uid}, subject ${subjectId}`);
         } else {
           await attendanceRef.set({
             absent: admin.firestore.FieldValue.arrayUnion(dayNumber)
           }, { merge: true });
-          console.log(`❌ Marked ABSENT for ${userId}, subject ${subjectId}`);
+          console.log(`❌ Marked ABSENT for ${uid}, subject ${subjectId} (distance: ${Math.round(distance)}m)`);
         }
       }
     }
@@ -190,58 +215,93 @@ db.collection('schedule').onSnapshot(async (snapshot) => {
 
       // Send FCM exactly at end time (only one FCM)
       setTimeout(async () => {
-        await sendLocationRequest(userId, subjectId);
+        await sendLocationRequest(userId);
       }, diff);
     }
   });
 });
 
 // ==================================================================
-// 🚀 Send FCM (PSEUDO-SILENT NOTIFICATION)
+// 🚀 Send FCM (NEW METHOD with googleapis)
 // ==================================================================
-async function sendLocationRequest(userId, subjectId) {
+async function sendLocationRequest(userId) {
   try {
     const userDoc = await db.collection('users').doc(userId).get();
-    if (!userDoc.exists) return;
+    if (!userDoc.exists) {
+      console.log(`❌ User ${userId} not found`);
+      return;
+    }
 
     const fcmToken = userDoc.data().fcmToken;
-    if (!fcmToken) return;
+    if (!fcmToken) {
+      console.log(`❌ No FCM token for user ${userId}`);
+      return;
+    }
 
+    console.log(`🔄 Getting access token for ${userId}...`);
+    
+    // Get access token
+    const jwtClient = new google.auth.JWT({
+      email: serviceAccount.client_email,
+      key: serviceAccount.private_key,
+      scopes: ['https://www.googleapis.com/auth/firebase.messaging']
+    });
+    
+    const tokens = await jwtClient.authorize();
+    console.log('✅ Access token obtained');
+
+    // Prepare FCM message
     const message = {
-      token: fcmToken,
-      notification: {
-        title: ' ',  // Single space (invisible)
-        body: ' '
-      },
-      data: {
-        type: 'LOCATION_REQUEST',
-        userId,
-        subjectId,
-        timestamp: Date.now().toString(),
-        silent: 'true'  // Flag for Android to cancel notification
-      },
-      android: {
-        priority: 'high',
-        notification: {
-          channelId: 'silent_location',
-          sound: '',
-          visibility: 'secret'
-        }
-      },
-      apns: {
-        headers: {
-          'apns-priority': '5'
+      message: {
+        token: fcmToken,
+        data: {
+          type: 'location_request'
         },
-        payload: {
-          aps: {
-            'content-available': 1
-          }
+        android: {
+          priority: 'high'
         }
       }
     };
 
-    await admin.messaging().send(message);
-    console.log(`✅ FCM sent successfully at end time to ${userId} for subject ${subjectId}`);
+    console.log(`📤 Sending notification to ${userId}...`);
+    
+    // Send request
+    const data = JSON.stringify(message);
+    const options = {
+      hostname: 'fcm.googleapis.com',
+      port: 443,
+      path: `/v1/projects/${serviceAccount.project_id}/messages:send`,
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${tokens.access_token}`,
+        'Content-Type': 'application/json',
+        'Content-Length': data.length
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let responseData = '';
+      
+      res.on('data', (chunk) => {
+        responseData += chunk;
+      });
+      
+      res.on('end', () => {
+        if (res.statusCode === 200) {
+          console.log(`✅ FCM sent successfully to ${userId}`);
+        } else {
+          console.log(`❌ FCM Error Status ${res.statusCode} for ${userId}:`, responseData);
+        }
+      });
+    });
+
+    req.on('error', (error) => {
+      console.error(`❌ Request failed for ${userId}:`, error.message);
+    });
+
+    req.write(data);
+    req.end();
+
   } catch (err) {
     console.error(`❌ Error sending FCM to ${userId}:`, err.message);
   }
