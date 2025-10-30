@@ -13,107 +13,283 @@ try {
   serviceAccount = JSON.parse(fs.readFileSync(secretPath, 'utf8'));
   console.log('✅ Firebase service account loaded from file');
 } catch (error) {
-  console.error('❌ Failed to load service account file:', error);
+  console.error('❌ Error loading serviceAccountKey.json:', error.message);
   process.exit(1);
 }
 
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-  });
-}
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
 
 const db = admin.firestore();
 
-const PORT = process.env.PORT || 10000;
+// ✅ Get current IST date properly
+function getISTDate() {
+  const now = new Date();
+  const istOffset = 5.5 * 60 * 60 * 1000; // +5:30 hrs
+  const utcTime = now.getTime() + (now.getTimezoneOffset() * 60 * 1000);
+  return new Date(utcTime + istOffset);
+}
 
-// ✅ Function to send FCM (fixed APNs error)
+// ✅ Utility: Calculate distance between coordinates (in meters)
+function calculateDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371e3;
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δφ = (lat2 - lat1) * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
+  const a =
+    Math.sin(Δφ / 2) ** 2 +
+    Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+// ==================================================================
+// 🔁 LISTENER FOR LOCATIONS (attendance marking)
+// ==================================================================
+db.collection('locations').onSnapshot(async (snapshot) => {
+  snapshot.docChanges().forEach(async (change) => {
+    if (change.type === 'added') {
+      const data = change.doc.data();
+      const { userId, subjectId, latitude, longitude } = data;
+      if (!userId || !subjectId || !latitude || !longitude) return;
+
+      console.log(`📍 New location received for ${userId}, subject ${subjectId}`);
+
+      const subjectDoc = await db
+        .collection('users').doc(userId)
+        .collection('subjects').doc(subjectId).get();
+
+      if (!subjectDoc.exists) return;
+
+      const subjectData = subjectDoc.data();
+      const classLat = subjectData.location?.latitude;
+      const classLon = subjectData.location?.longitude;
+      const accuracyThreshold = subjectData.location?.accuracy || 50;
+
+      if (!classLat || !classLon) return;
+
+      const distance = calculateDistance(latitude, longitude, classLat, classLon);
+      const istDate = getISTDate();
+      const dayNumber = istDate.getDate();
+      const monthName = istDate.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase();
+      const year = istDate.getFullYear();
+      const monthYear = `${monthName} ${year}`;
+
+      const attendanceRef = db.collection('users')
+        .doc(userId)
+        .collection('subjects')
+        .doc(subjectId)
+        .collection('attendance')
+        .doc(monthYear);
+
+      const attendanceDoc = await attendanceRef.get();
+      const attendanceData = attendanceDoc.exists ? attendanceDoc.data() : {};
+      const presentDays = attendanceData.present || [];
+      const absentDays = attendanceData.absent || [];
+
+      if (!presentDays.includes(dayNumber) && !absentDays.includes(dayNumber)) {
+        if (distance <= accuracyThreshold) {
+          await attendanceRef.set({
+            present: admin.firestore.FieldValue.arrayUnion(dayNumber)
+          }, { merge: true });
+          console.log(`✅ Marked PRESENT for ${userId}, subject ${subjectId}`);
+        } else {
+          await attendanceRef.set({
+            absent: admin.firestore.FieldValue.arrayUnion(dayNumber)
+          }, { merge: true });
+          console.log(`❌ Marked ABSENT for ${userId}, subject ${subjectId}`);
+        }
+      }
+    }
+  });
+});
+
+// ==================================================================
+// 🧭 CLASS SCANNING & SCHEDULE CREATION
+// ==================================================================
+async function scanAndQueueClasses() {
+  const istDate = getISTDate();
+  const currentDay = istDate.toLocaleString('en-US', { weekday: 'long' }).toLowerCase();
+  const timeString = istDate.toTimeString().split(' ')[0];
+  console.log(`\n🔍 Scanning for classes on ${currentDay} - ${timeString}`);
+
+  const usersSnapshot = await db.collection('users').get();
+
+  for (const userDoc of usersSnapshot.docs) {
+    const userId = userDoc.id;
+    const subjectsSnapshot = await db.collection('users').doc(userId).collection('subjects').get();
+
+    for (const subjectDoc of subjectsSnapshot.docs) {
+      const subjectId = subjectDoc.id;
+      const subjectData = subjectDoc.data();
+      const schedule = subjectData.schedule || {};
+
+      const matchingDayKey = Object.keys(schedule).find(
+        key => key.toLowerCase() === currentDay
+      );
+      if (!matchingDayKey) continue;
+
+      let startTime, endTime;
+      const scheduleEntry = schedule[matchingDayKey];
+      if (Array.isArray(scheduleEntry) && scheduleEntry.length > 0) {
+        startTime = scheduleEntry[0].start;
+        endTime = scheduleEntry[0].end;
+      } else if (scheduleEntry && scheduleEntry.start) {
+        startTime = scheduleEntry.start;
+        endTime = scheduleEntry.end;
+      }
+
+      if (!startTime || !endTime) continue;
+
+      const [endH, endM] = endTime.split(':').map(Number);
+
+      const classEnd = new Date(istDate);
+      classEnd.setHours(endH, endM, 0, 0);
+
+      const endTimeISTString = classEnd.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+
+      const existingSchedule = await db.collection('schedule')
+        .where('userId', '==', userId)
+        .where('subjectId', '==', subjectId)
+        .where('date', '==', istDate.toDateString())
+        .get();
+
+      if (!existingSchedule.empty) continue;
+
+      await db.collection('schedule').add({
+        userId,
+        subjectId,
+        timestamp: `timestamp${endTimeISTString}`,
+        endTime: admin.firestore.Timestamp.fromDate(classEnd),
+        date: istDate.toDateString()
+      });
+
+      console.log(`🗓️ Added to schedule: ${userId} - ${subjectId} @ ${endTimeISTString}`);
+    }
+  }
+}
+
+// ==================================================================
+// 👂 OBSERVE SCHEDULE COLLECTION & SEND FCM AT END TIME (ONLY ONCE)
+// ==================================================================
+db.collection('schedule').onSnapshot(async (snapshot) => {
+  const now = getISTDate();
+  snapshot.docChanges().forEach(async (change) => {
+    if (change.type === 'added') {
+      const data = change.doc.data();
+      const { userId, subjectId, endTime } = data;
+      if (!userId || !subjectId || !endTime) return;
+
+      const endDate = endTime.toDate();
+      const diff = endDate.getTime() - now.getTime();
+      if (diff <= 0) return;
+
+      console.log(`🕒 FCM will be sent exactly at end of class ${subjectId} for ${userId} (in ${Math.round(diff / 60000)} mins)`);
+
+      // Send FCM exactly at end time (only one FCM)
+      setTimeout(async () => {
+        await sendLocationRequest(userId, subjectId);
+      }, diff);
+    }
+  });
+});
+
+// ==================================================================
+// 🚀 Send FCM (PSEUDO-SILENT NOTIFICATION)
+// ==================================================================
 async function sendLocationRequest(userId, subjectId) {
   try {
     const userDoc = await db.collection('users').doc(userId).get();
-    if (!userDoc.exists) return console.log(`⚠️ No user found for ID: ${userId}`);
+    if (!userDoc.exists) return;
 
-    const FCM_TOKEN = userDoc.data().fcmToken;
-    if (!FCM_TOKEN) return console.log(`⚠️ No FCM token for ${userId}`);
+    const fcmToken = userDoc.data().fcmToken;
+    if (!fcmToken) return;
 
     const message = {
-      token: FCM_TOKEN,
+      token: fcmToken,
       notification: {
-        title: 'Updating location...',
-        body: 'Processing silently',
+        title: ' ',  // Single space (invisible)
+        body: ' '
       },
       data: {
         type: 'LOCATION_REQUEST',
         userId,
         subjectId,
-        silent: 'true',
+        timestamp: Date.now().toString(),
+        silent: 'true'  // Flag for Android to cancel notification
       },
       android: {
         priority: 'high',
         notification: {
-          sound: 'default',
-          channelId: 'default',
-        },
+          channelId: 'silent_location',
+          sound: '',
+          visibility: 'secret'
+        }
       },
       apns: {
+        headers: {
+          'apns-priority': '5'
+        },
         payload: {
           aps: {
-            contentAvailable: true,
-            sound: 'default', // ✅ FIXED: non-empty string to avoid APNs error
-          },
-        },
-      },
+            'content-available': 1,
+            sound: ''
+          }
+        }
+      }
     };
 
     await admin.messaging().send(message);
-    console.log(`🚀 Sent FCM to ${userId} for subject ${subjectId}`);
-  } catch (error) {
-    console.error(`❌ Error sending FCM to ${userId}:`, error.message);
+    console.log(`✅ FCM sent successfully at end time to ${userId} for subject ${subjectId}`);
+  } catch (err) {
+    console.error(`❌ Error sending FCM to ${userId}:`, err.message);
   }
 }
 
-// Example function to simulate schedule checking
-async function scanForClasses() {
-  const now = new Date();
-  const day = now.toLocaleString('en-US', { weekday: 'long' }).toLowerCase();
-  console.log(`🔍 Scanning for classes on ${day} - ${now.toLocaleTimeString()}`);
+// ==================================================================
+// 🩺 Health Check & Ping
+// ==================================================================
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timeIST: getISTDate().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) });
+});
+app.get('/ping', (req, res) => res.status(200).send('OK'));
 
-  // Example query for classes
-  const snapshot = await db.collection('schedules')
-    .where('day', '==', day)
-    .get();
+// ==================================================================
+// 📍 Submit Location API
+// ==================================================================
+app.post('/submit-location', async (req, res) => {
+  try {
+    const { userId, subjectId, latitude, longitude } = req.body;
+    if (!userId || !subjectId || !latitude || !longitude)
+      return res.status(400).json({ error: 'Missing required fields' });
 
-  let count = 0;
-  snapshot.forEach((doc) => {
-    const data = doc.data();
-    const userId = data.userId;
-    const subjectId = data.subjectId;
-    const startTime = data.startTime?.toDate();
-    const endTime = data.endTime?.toDate();
+    await db.collection('locations').add({
+      userId,
+      subjectId,
+      latitude,
+      longitude,
+      timestamp: admin.firestore.FieldValue.serverTimestamp()
+    });
 
-    if (!startTime || !endTime) return;
+    console.log(`✅ Location stored for ${userId}, ${subjectId}`);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('❌ Error storing location:', e);
+    res.status(500).json({ error: 'Failed to store location' });
+  }
+});
 
-    const diff = (startTime - now) / 60000;
-    if (diff > 0 && diff < 2) {
-      console.log(`🗓️ Added to schedule: ${userId} - ${subjectId} @ ${startTime}`);
-      setTimeout(() => sendLocationRequest(userId, subjectId), 2000);
-      count++;
-    }
-
-    const endDiff = (endTime - now) / 60000;
-    if (endDiff > 0 && endDiff < 2) {
-      console.log(`🕒 FCM will be sent exactly at end of class ${subjectId} for ${userId} (in ${Math.round(endDiff)} mins)`);
-      setTimeout(() => sendLocationRequest(userId, subjectId), endDiff * 60 * 1000);
-      count++;
-    }
-  });
-
-  console.log(`📊 Summary: ${count} FCMs queued for today`);
-}
-
-// Run scanner every minute
-setInterval(scanForClasses, 60 * 1000);
-
-app.listen(PORT, () => {
+// ==================================================================
+// 🚀 SERVER START
+// ==================================================================
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, async () => {
+  console.log('🚀 Starting server...');
+  console.log('🇮🇳 Using Indian Standard Time (IST)');
+  await scanAndQueueClasses(); // initial scan
   console.log(`✅ Server running on port ${PORT}`);
 });
+
+setInterval(scanAndQueueClasses, 60 * 1000);
