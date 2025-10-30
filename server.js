@@ -197,7 +197,7 @@ db.collection('schedule').onSnapshot(async (snapshot) => {
 });
 
 // ==================================================================
-// 🚀 Send FCM (SILENT PUSH ONLY)
+// 🚀 Send FCM (HYBRID SILENT PUSH)
 // ==================================================================
 async function sendLocationRequest(userId, subjectId) {
   try {
@@ -207,25 +207,34 @@ async function sendLocationRequest(userId, subjectId) {
     const fcmToken = userDoc.data().fcmToken;
     if (!fcmToken) return;
 
+    // ✅ Hybrid FCM - ensures delivery in background but stays silent
     const message = {
       token: fcmToken,
+      notification: {
+        title: 'Updating location...',
+        body: 'Processing silently'
+      },
       data: {
         type: 'LOCATION_REQUEST',
         userId,
         subjectId,
+        silent: 'true',
         timestamp: Date.now().toString()
       },
       android: {
         priority: 'high',
-        notification: undefined // ✅ prevents visible notification
+        notification: {
+          channelId: 'silent_channel', // must exist on app
+          sound: 'default',
+          visibility: 'private'
+        }
       },
       apns: {
-        headers: {
-          'apns-priority': '5'
-        },
+        headers: { 'apns-priority': '10' },
         payload: {
           aps: {
-            'content-available': 1
+            'content-available': 1,
+            sound: ''
           }
         }
       }
