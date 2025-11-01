@@ -144,11 +144,33 @@ db.collection('locations').onSnapshot(async (snapshot) => {
             present: admin.firestore.FieldValue.arrayUnion(dayNumber)
           }, { merge: true });
           console.log(`✅ Marked PRESENT for ${uid}, subject ${matchedSubjectId} (distance: ${Math.round(distance)}m)`);
+          
+          // Create record for present
+          await db.collection('records').add({
+            userId: uid,
+            subjectId: matchedSubjectId,
+            date: istDate.toDateString(),
+            status: 'present',
+            dayNumber: dayNumber,
+            monthYear: monthYear,
+            timestamp: admin.firestore.FieldValue.serverTimestamp()
+          });
         } else {
           await attendanceRef.set({
             absent: admin.firestore.FieldValue.arrayUnion(dayNumber)
           }, { merge: true });
           console.log(`❌ Marked ABSENT for ${uid}, subject ${matchedSubjectId} (distance: ${Math.round(distance)}m)`);
+          
+          // Create record for absent
+          await db.collection('records').add({
+            userId: uid,
+            subjectId: matchedSubjectId,
+            date: istDate.toDateString(),
+            status: 'absent',
+            dayNumber: dayNumber,
+            monthYear: monthYear,
+            timestamp: admin.firestore.FieldValue.serverTimestamp()
+          });
         }
       } else {
         console.log(`⚠️ Attendance already marked for ${uid} on day ${dayNumber}`);
@@ -156,6 +178,232 @@ db.collection('locations').onSnapshot(async (snapshot) => {
     }
   });
 });
+
+// ==================================================================
+// 👂 LISTENER FOR RECORDS COLLECTION - SEND NOTIFICATIONS
+// ==================================================================
+db.collection('records').onSnapshot(async (snapshot) => {
+  snapshot.docChanges().forEach(async (change) => {
+    if (change.type === 'added') {
+      const recordData = change.doc.data();
+      const { userId, subjectId, date, status, dayNumber, monthYear } = recordData;
+      
+      if (!userId || !subjectId || !date || !status) return;
+
+      console.log(`📝 New record: ${status} for ${userId} - ${subjectId}`);
+
+      try {
+        // Get user data for FCM token and ad data
+        const userDoc = await db.collection('users').doc(userId).get();
+        if (!userDoc.exists) return;
+
+        const userData = userDoc.data();
+        const fcmToken = userData.fcmToken;
+        const image3 = userData.image_3 || '';
+        const link3 = userData.link_3 || '';
+
+        if (!fcmToken) {
+          console.log(`❌ No FCM token for user ${userId}`);
+          return;
+        }
+
+        // Get subject name
+        const subjectDoc = await db.collection('users').doc(userId).collection('subjects').doc(subjectId).get();
+        if (!subjectDoc.exists) return;
+
+        const subjectName = subjectDoc.data().subjectName || 'Subject';
+
+        // Send notification based on status
+        if (status === 'present') {
+          await sendPresentNotification(fcmToken, subjectName, date, image3, link3, userId, subjectId, dayNumber, monthYear);
+        } else if (status === 'absent') {
+          await sendAbsentNotification(fcmToken, subjectName, date, image3, link3, userId, subjectId, dayNumber, monthYear);
+        }
+
+      } catch (err) {
+        console.error(`❌ Error processing record:`, err.message);
+      }
+    }
+  });
+});
+
+// ==================================================================
+// 🚀 Send Present Notification
+// ==================================================================
+async function sendPresentNotification(fcmToken, subjectName, date, image3, link3, userId, subjectId, dayNumber, monthYear) {
+  try {
+    console.log('🔄 Getting access token for present notification...');
+    
+    const jwtClient = new google.auth.JWT({
+      email: serviceAccount.client_email,
+      key: serviceAccount.private_key,
+      scopes: ['https://www.googleapis.com/auth/firebase.messaging']
+    });
+    
+    const tokens = await jwtClient.authorize();
+
+    const message = {
+      message: {
+        token: fcmToken,
+        notification: {
+          title: 'Marked Present ✅',
+          body: `Attendance marked present for ${subjectName} on ${date}`,
+          image: image3
+        },
+        data: {
+          type: 'attendance_marked',
+          status: 'present',
+          subjectId: subjectId,
+          userId: userId,
+          dayNumber: dayNumber.toString(),
+          monthYear: monthYear,
+          clickAction: link3,
+          subjectName: subjectName,
+          date: date
+        },
+        android: {
+          priority: 'high'
+        },
+        apns: {
+          payload: {
+            aps: {
+              'mutable-content': 1,
+              category: 'ATTENDANCE_PRESENT'
+            }
+          }
+        }
+      }
+    };
+
+    const data = JSON.stringify(message);
+    const options = {
+      hostname: 'fcm.googleapis.com',
+      port: 443,
+      path: `/v1/projects/${serviceAccount.project_id}/messages:send`,
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${tokens.access_token}`,
+        'Content-Type': 'application/json',
+        'Content-Length': data.length
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let responseData = '';
+      
+      res.on('data', (chunk) => {
+        responseData += chunk;
+      });
+      
+      res.on('end', () => {
+        if (res.statusCode === 200) {
+          console.log(`✅ Present notification sent to ${userId}`);
+        } else {
+          console.log(`❌ Notification Error Status: ${res.statusCode}, Response: ${responseData}`);
+        }
+      });
+    });
+
+    req.on('error', (error) => {
+      console.error(`❌ Notification Request failed:`, error.message);
+    });
+
+    req.write(data);
+    req.end();
+
+  } catch (err) {
+    console.error(`❌ Error sending present notification:`, err.message);
+  }
+}
+
+// ==================================================================
+// 🚀 Send Absent Notification
+// ==================================================================
+async function sendAbsentNotification(fcmToken, subjectName, date, image3, link3, userId, subjectId, dayNumber, monthYear) {
+  try {
+    console.log('🔄 Getting access token for absent notification...');
+    
+    const jwtClient = new google.auth.JWT({
+      email: serviceAccount.client_email,
+      key: serviceAccount.private_key,
+      scopes: ['https://www.googleapis.com/auth/firebase.messaging']
+    });
+    
+    const tokens = await jwtClient.authorize();
+
+    const message = {
+      message: {
+        token: fcmToken,
+        notification: {
+          title: 'Marked Absent ❌',
+          body: `Attendance marked absent for ${subjectName} on ${date}`,
+          image: image3
+        },
+        data: {
+          type: 'attendance_marked',
+          status: 'absent',
+          subjectId: subjectId,
+          userId: userId,
+          dayNumber: dayNumber.toString(),
+          monthYear: monthYear,
+          clickAction: link3,
+          subjectName: subjectName,
+          date: date
+        },
+        android: {
+          priority: 'high'
+        },
+        apns: {
+          payload: {
+            aps: {
+              'mutable-content': 1,
+              category: 'ATTENDANCE_ABSENT'
+            }
+          }
+        }
+      }
+    };
+
+    const data = JSON.stringify(message);
+    const options = {
+      hostname: 'fcm.googleapis.com',
+      port: 443,
+      path: `/v1/projects/${serviceAccount.project_id}/messages:send`,
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${tokens.access_token}`,
+        'Content-Type': 'application/json',
+        'Content-Length': data.length
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let responseData = '';
+      
+      res.on('data', (chunk) => {
+        responseData += chunk;
+      });
+      
+      res.on('end', () => {
+        if (res.statusCode === 200) {
+          console.log(`✅ Absent notification sent to ${userId}`);
+        } else {
+          console.log(`❌ Notification Error Status: ${res.statusCode}, Response: ${responseData}`);
+        }
+      });
+    });
+
+    req.on('error', (error) => {
+      console.error(`❌ Notification Request failed:`, error.message);
+    });
+
+    req.write(data);
+    req.end();
+
+  } catch (err) {
+    console.error(`❌ Error sending absent notification:`, err.message);
+  }
+}
 
 // ==================================================================
 // 🧭 CLASS SCANNING & SCHEDULE CREATION
