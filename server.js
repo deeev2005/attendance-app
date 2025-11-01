@@ -242,13 +242,13 @@ async function sendPresentNotification(fcmToken, subjectName, date, image3, link
     
     const tokens = await jwtClient.authorize();
 
+    // Build message object with only valid fields
     const message = {
       message: {
         token: fcmToken,
         notification: {
           title: 'Marked Present ✅',
-          body: `Attendance marked present for ${subjectName} on ${date}`,
-          image: image3
+          body: `Attendance marked present for ${subjectName} on ${date}`
         },
         data: {
           type: 'attendance_marked',
@@ -256,25 +256,34 @@ async function sendPresentNotification(fcmToken, subjectName, date, image3, link
           subjectId: subjectId,
           userId: userId,
           dayNumber: dayNumber.toString(),
-          monthYear: monthYear,
-          clickAction: link3
+          monthYear: monthYear
         },
         android: {
           priority: 'high'
-        },
-        apns: {
-          payload: {
-            aps: {
-              'mutable-content': 1,
-              category: 'ATTENDANCE_PRESENT'
-            }
-          },
-          fcm_options: {
-            image: image3
-          }
         }
       }
     };
+
+    // Add image only if it exists and is valid
+    if (image3 && image3.trim() !== '') {
+      message.message.notification.image = image3;
+      message.message.apns = {
+        payload: {
+          aps: {
+            'mutable-content': 1,
+            category: 'ATTENDANCE_PRESENT'
+          }
+        },
+        fcm_options: {
+          image: image3
+        }
+      };
+    }
+
+    // Add clickAction only if it exists and is valid
+    if (link3 && link3.trim() !== '') {
+      message.message.data.clickAction = link3;
+    }
 
     const data = JSON.stringify(message);
     const options = {
@@ -332,13 +341,13 @@ async function sendAbsentNotification(fcmToken, subjectName, date, image3, link3
     
     const tokens = await jwtClient.authorize();
 
+    // Build message object with only valid fields
     const message = {
       message: {
         token: fcmToken,
         notification: {
           title: 'Marked Absent ❌',
-          body: `Attendance marked absent for ${subjectName} on ${date}`,
-          image: image3
+          body: `Attendance marked absent for ${subjectName} on ${date}`
         },
         data: {
           type: 'attendance_marked',
@@ -346,25 +355,34 @@ async function sendAbsentNotification(fcmToken, subjectName, date, image3, link3
           subjectId: subjectId,
           userId: userId,
           dayNumber: dayNumber.toString(),
-          monthYear: monthYear,
-          clickAction: link3
+          monthYear: monthYear
         },
         android: {
           priority: 'high'
-        },
-        apns: {
-          payload: {
-            aps: {
-              'mutable-content': 1,
-              category: 'ATTENDANCE_ABSENT'
-            }
-          },
-          fcm_options: {
-            image: image3
-          }
         }
       }
     };
+
+    // Add image only if it exists and is valid
+    if (image3 && image3.trim() !== '') {
+      message.message.notification.image = image3;
+      message.message.apns = {
+        payload: {
+          aps: {
+            'mutable-content': 1,
+            category: 'ATTENDANCE_ABSENT'
+          }
+        },
+        fcm_options: {
+          image: image3
+        }
+      };
+    }
+
+    // Add clickAction only if it exists and is valid
+    if (link3 && link3.trim() !== '') {
+      message.message.data.clickAction = link3;
+    }
 
     const data = JSON.stringify(message);
     const options = {
