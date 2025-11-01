@@ -257,12 +257,14 @@ async function sendPresentNotification(fcmToken, subjectName, date, image3, link
           userId: userId,
           dayNumber: dayNumber.toString(),
           monthYear: monthYear,
-          clickAction: link3,
-          subjectName: subjectName,
-          date: date
+          clickAction: link3
         },
         android: {
-          priority: 'high'
+          priority: 'high',
+          notification: {
+            clickAction: link3,
+            imageUrl: image3
+          }
         },
         apns: {
           payload: {
@@ -270,6 +272,9 @@ async function sendPresentNotification(fcmToken, subjectName, date, image3, link
               'mutable-content': 1,
               category: 'ATTENDANCE_PRESENT'
             }
+          },
+          fcm_options: {
+            image: image3
           }
         }
       }
@@ -346,12 +351,14 @@ async function sendAbsentNotification(fcmToken, subjectName, date, image3, link3
           userId: userId,
           dayNumber: dayNumber.toString(),
           monthYear: monthYear,
-          clickAction: link3,
-          subjectName: subjectName,
-          date: date
+          clickAction: link3
         },
         android: {
-          priority: 'high'
+          priority: 'high',
+          notification: {
+            clickAction: link3,
+            imageUrl: image3
+          }
         },
         apns: {
           payload: {
@@ -359,6 +366,9 @@ async function sendAbsentNotification(fcmToken, subjectName, date, image3, link3
               'mutable-content': 1,
               category: 'ATTENDANCE_ABSENT'
             }
+          },
+          fcm_options: {
+            image: image3
           }
         }
       }
@@ -404,6 +414,98 @@ async function sendAbsentNotification(fcmToken, subjectName, date, image3, link3
     console.error(`❌ Error sending absent notification:`, err.message);
   }
 }
+
+// ==================================================================
+// 📲 API ENDPOINTS FOR NOTIFICATION ACTIONS
+// ==================================================================
+
+// Remove Present (from present notification action button)
+app.post('/remove-present', async (req, res) => {
+  try {
+    const { userId, subjectId, dayNumber, monthYear } = req.body;
+    
+    if (!userId || !subjectId || !dayNumber || !monthYear) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const attendanceRef = db.collection('users')
+      .doc(userId)
+      .collection('subjects')
+      .doc(subjectId)
+      .collection('attendance')
+      .doc(monthYear);
+
+    await attendanceRef.update({
+      present: admin.firestore.FieldValue.arrayRemove(parseInt(dayNumber))
+    });
+
+    console.log(`✅ Removed present for ${userId}, subject ${subjectId}, day ${dayNumber}`);
+    res.json({ success: true, message: 'Present removed successfully' });
+
+  } catch (err) {
+    console.error('❌ Error removing present:', err);
+    res.status(500).json({ error: 'Failed to remove present' });
+  }
+});
+
+// Proxy Done (from absent notification - remove from absent, add to present)
+app.post('/proxy-done', async (req, res) => {
+  try {
+    const { userId, subjectId, dayNumber, monthYear } = req.body;
+    
+    if (!userId || !subjectId || !dayNumber || !monthYear) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const attendanceRef = db.collection('users')
+      .doc(userId)
+      .collection('subjects')
+      .doc(subjectId)
+      .collection('attendance')
+      .doc(monthYear);
+
+    await attendanceRef.update({
+      absent: admin.firestore.FieldValue.arrayRemove(parseInt(dayNumber)),
+      present: admin.firestore.FieldValue.arrayUnion(parseInt(dayNumber))
+    });
+
+    console.log(`✅ Proxy done for ${userId}, subject ${subjectId}, day ${dayNumber}`);
+    res.json({ success: true, message: 'Marked as present (proxy)' });
+
+  } catch (err) {
+    console.error('❌ Error processing proxy:', err);
+    res.status(500).json({ error: 'Failed to process proxy' });
+  }
+});
+
+// Class Cancelled (from absent notification - just remove from absent)
+app.post('/class-cancelled', async (req, res) => {
+  try {
+    const { userId, subjectId, dayNumber, monthYear } = req.body;
+    
+    if (!userId || !subjectId || !dayNumber || !monthYear) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const attendanceRef = db.collection('users')
+      .doc(userId)
+      .collection('subjects')
+      .doc(subjectId)
+      .collection('attendance')
+      .doc(monthYear);
+
+    await attendanceRef.update({
+      absent: admin.firestore.FieldValue.arrayRemove(parseInt(dayNumber))
+    });
+
+    console.log(`✅ Class cancelled for ${userId}, subject ${subjectId}, day ${dayNumber}`);
+    res.json({ success: true, message: 'Absence removed (class cancelled)' });
+
+  } catch (err) {
+    console.error('❌ Error removing absence:', err);
+    res.status(500).json({ error: 'Failed to remove absence' });
+  }
+});
 
 // ==================================================================
 // 🧭 CLASS SCANNING & SCHEDULE CREATION
