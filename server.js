@@ -48,79 +48,55 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
 }
 
 // ==================================================================
-// 🔁 LISTENER FOR LOCATIONS (attendance marking with auto subject detection)
+// 🔁 LISTENER FOR LOCATIONS (attendance marking with schedule lookup)
 // ==================================================================
 db.collection('locations').onSnapshot(async (snapshot) => {
   snapshot.docChanges().forEach(async (change) => {
     if (change.type === 'added') {
       const data = change.doc.data();
-      const { uid, latitude, longitude, dataType } = data;
-      
-      // Check if it's a location_request type
-      if (!uid || !latitude || !longitude || dataType !== 'location_request') return;
+      const { uid, latitude, longitude, timestamp } = data;
+      if (!uid || !latitude || !longitude) return;
 
       console.log(`📍 New location received for ${uid}`);
 
-      // Get current IST time
-      const istDate = getISTDate();
-      const currentDay = istDate.toLocaleString('en-US', { weekday: 'long' }).toLowerCase();
-      const currentTime = istDate.toTimeString().split(' ')[0]; // HH:MM:SS
-      const [currentHour, currentMinute] = currentTime.split(':').map(Number);
+      // Get the timestamp of the location
+      const locationTime = timestamp ? timestamp.toDate() : new Date();
+      const oneMinuteAgo = new Date(locationTime.getTime() - 60 * 1000);
+      const oneMinuteAfter = new Date(locationTime.getTime() + 60 * 1000);
 
-      // Find which subject just ended for this user
-      const subjectsSnapshot = await db.collection('users').doc(uid).collection('subjects').get();
-      
-      let matchedSubjectId = null;
-      let matchedSubjectData = null;
+      // Search schedule collection for this user within 1 minute timeframe
+      const scheduleSnapshot = await db.collection('schedule')
+        .where('userId', '==', uid)
+        .where('endTime', '>=', admin.firestore.Timestamp.fromDate(oneMinuteAgo))
+        .where('endTime', '<=', admin.firestore.Timestamp.fromDate(oneMinuteAfter))
+        .get();
 
-      for (const subjectDoc of subjectsSnapshot.docs) {
-        const subjectData = subjectDoc.data();
-        const schedule = subjectData.schedule || {};
-
-        const matchingDayKey = Object.keys(schedule).find(
-          key => key.toLowerCase() === currentDay
-        );
-        if (!matchingDayKey) continue;
-
-        let endTime;
-        const scheduleEntry = schedule[matchingDayKey];
-        if (Array.isArray(scheduleEntry) && scheduleEntry.length > 0) {
-          endTime = scheduleEntry[0].end;
-        } else if (scheduleEntry && scheduleEntry.end) {
-          endTime = scheduleEntry.end;
-        }
-
-        if (!endTime) continue;
-
-        const [endH, endM] = endTime.split(':').map(Number);
-
-        // Check if this class just ended (within 10 minutes window)
-        const timeDiffMinutes = (currentHour * 60 + currentMinute) - (endH * 60 + endM);
-        
-        if (timeDiffMinutes >= 0 && timeDiffMinutes <= 10) {
-          matchedSubjectId = subjectDoc.id;
-          matchedSubjectData = subjectData;
-          break;
-        }
-      }
-
-      if (!matchedSubjectId || !matchedSubjectData) {
-        console.log(`❌ No matching subject found for ${uid} at current time`);
+      if (scheduleSnapshot.empty) {
+        console.log(`⚠️ No scheduled class found for ${uid} in the timeframe`);
         return;
       }
 
-      console.log(`✅ Matched subject: ${matchedSubjectId} for ${uid}`);
+      // Get the first matching schedule (should be only one)
+      const scheduleDoc = scheduleSnapshot.docs[0];
+      const subjectId = scheduleDoc.data().subjectId;
 
-      const classLat = matchedSubjectData.location?.latitude;
-      const classLon = matchedSubjectData.location?.longitude;
-      const accuracyThreshold = matchedSubjectData.location?.accuracy || 50;
+      console.log(`📚 Found subject ${subjectId} for user ${uid}`);
 
-      if (!classLat || !classLon) {
-        console.log(`❌ No location set for subject ${matchedSubjectId}`);
-        return;
-      }
+      const subjectDoc = await db
+        .collection('users').doc(uid)
+        .collection('subjects').doc(subjectId).get();
+
+      if (!subjectDoc.exists) return;
+
+      const subjectData = subjectDoc.data();
+      const classLat = subjectData.location?.latitude;
+      const classLon = subjectData.location?.longitude;
+      const accuracyThreshold = subjectData.location?.accuracy || 50;
+
+      if (!classLat || !classLon) return;
 
       const distance = calculateDistance(latitude, longitude, classLat, classLon);
+      const istDate = getISTDate();
       const dayNumber = istDate.getDate();
       const monthName = istDate.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase();
       const year = istDate.getFullYear();
@@ -129,7 +105,7 @@ db.collection('locations').onSnapshot(async (snapshot) => {
       const attendanceRef = db.collection('users')
         .doc(uid)
         .collection('subjects')
-        .doc(matchedSubjectId)
+        .doc(subjectId)
         .collection('attendance')
         .doc(monthYear);
 
@@ -143,15 +119,13 @@ db.collection('locations').onSnapshot(async (snapshot) => {
           await attendanceRef.set({
             present: admin.firestore.FieldValue.arrayUnion(dayNumber)
           }, { merge: true });
-          console.log(`✅ Marked PRESENT for ${uid}, subject ${matchedSubjectId} (distance: ${Math.round(distance)}m)`);
+          console.log(`✅ Marked PRESENT for ${uid}, subject ${subjectId}`);
         } else {
           await attendanceRef.set({
             absent: admin.firestore.FieldValue.arrayUnion(dayNumber)
           }, { merge: true });
-          console.log(`❌ Marked ABSENT for ${uid}, subject ${matchedSubjectId} (distance: ${Math.round(distance)}m)`);
+          console.log(`❌ Marked ABSENT for ${uid}, subject ${subjectId} (distance: ${Math.round(distance)}m)`);
         }
-      } else {
-        console.log(`⚠️ Attendance already marked for ${uid} on day ${dayNumber}`);
       }
     }
   });
@@ -248,12 +222,15 @@ db.collection('schedule').onSnapshot(async (snapshot) => {
 });
 
 // ==================================================================
-// 🚀 Send FCM (NEW METHOD using googleapis)
+// 🚀 Send FCM (NEW METHOD with googleapis)
 // ==================================================================
 async function sendLocationRequest(userId) {
   try {
     const userDoc = await db.collection('users').doc(userId).get();
-    if (!userDoc.exists) return;
+    if (!userDoc.exists) {
+      console.log(`❌ User ${userId} not found`);
+      return;
+    }
 
     const fcmToken = userDoc.data().fcmToken;
     if (!fcmToken) {
@@ -261,9 +238,9 @@ async function sendLocationRequest(userId) {
       return;
     }
 
-    console.log('🔄 Getting access token...');
+    console.log(`🔄 Getting access token for ${userId}...`);
     
-    // Get access token using googleapis
+    // Get access token
     const jwtClient = new google.auth.JWT({
       email: serviceAccount.client_email,
       key: serviceAccount.private_key,
@@ -286,8 +263,8 @@ async function sendLocationRequest(userId) {
       }
     };
 
-    console.log('📤 Sending notification...');
-
+    console.log(`📤 Sending notification to ${userId}...`);
+    
     // Send request
     const data = JSON.stringify(message);
     const options = {
@@ -313,13 +290,13 @@ async function sendLocationRequest(userId) {
         if (res.statusCode === 200) {
           console.log(`✅ FCM sent successfully to ${userId}`);
         } else {
-          console.log(`❌ FCM Error Status: ${res.statusCode}, Response: ${responseData}`);
+          console.log(`❌ FCM Error Status ${res.statusCode} for ${userId}:`, responseData);
         }
       });
     });
 
     req.on('error', (error) => {
-      console.error(`❌ FCM Request failed for ${userId}:`, error.message);
+      console.error(`❌ Request failed for ${userId}:`, error.message);
     });
 
     req.write(data);
