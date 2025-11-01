@@ -260,11 +260,7 @@ async function sendPresentNotification(fcmToken, subjectName, date, image3, link
           clickAction: link3
         },
         android: {
-          priority: 'high',
-          notification: {
-            clickAction: link3,
-            imageUrl: image3
-          }
+          priority: 'high'
         },
         apns: {
           payload: {
@@ -354,11 +350,7 @@ async function sendAbsentNotification(fcmToken, subjectName, date, image3, link3
           clickAction: link3
         },
         android: {
-          priority: 'high',
-          notification: {
-            clickAction: link3,
-            imageUrl: image3
-          }
+          priority: 'high'
         },
         apns: {
           payload: {
