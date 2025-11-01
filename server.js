@@ -1,228 +1,377 @@
-import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import 'theme_manager.dart';
-import 'screens/home_screen.dart';
-import 'screens/profile_setup_screen.dart';
-import 'screens/profile_screen.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:device_info_plus/device_info_plus.dart';
-import 'dart:io';
+const express = require('express');
+const admin = require('firebase-admin');
+const fs = require('fs');
+const path = require('path');
+const { google } = require('googleapis');
+const https = require('https');
 
-// Firebase packages
-import 'package:firebase_core/firebase_core.dart';
-import 'firebase_options.dart';
+const app = express();
+app.use(express.json());
 
-// FCM and Location packages
-import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:geolocator/geolocator.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-
-// Background message handler - MUST be top-level function
-@pragma('vm:entry-point')
-Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  debugPrint('📩 Background message received: ${message.messageId}');
-  debugPrint('📩 Data: ${message.data}');
-  
-  // Check if it's a location request
-  if (message.data['type'] == 'location_request') {
-    await _handleLocationRequest(message);
-  }
+// Initialize Firebase Admin using secret file
+let serviceAccount;
+try {
+  const secretPath = path.join(__dirname, 'serviceAccountKey.json');
+  serviceAccount = JSON.parse(fs.readFileSync(secretPath, 'utf8'));
+  console.log('✅ Firebase service account loaded from file');
+} catch (error) {
+  console.error('❌ Error loading serviceAccountKey.json:', error.message);
+  process.exit(1);
 }
 
-// Function to get and send location
-Future<void> _handleLocationRequest(RemoteMessage message) async {
-  try {
-    // Check permission
-    LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied || 
-        permission == LocationPermission.deniedForever) {
-      debugPrint('❌ Location permission denied');
-      return;
-    }
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
 
-    // Get current location
-    Position position = await Geolocator.getCurrentPosition(
-      desiredAccuracy: LocationAccuracy.high,
-      timeLimit: const Duration(seconds: 10),
-    );
+const db = admin.firestore();
 
-    debugPrint('📍 Location obtained: ${position.latitude}, ${position.longitude}');
-
-    // Get user UID
-    String? uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid == null) {
-      debugPrint('❌ No user logged in');
-      return;
-    }
-
-    // Save to Firestore
-    await FirebaseFirestore.instance
-        .collection('locations')
-        .add({
-      'uid': uid,
-      'latitude': position.latitude,
-      'longitude': position.longitude,
-      'accuracy': position.accuracy,
-      'timestamp': FieldValue.serverTimestamp(),
-      'messageId': message.messageId,
-      'dataType': message.data['type'],
-    });
-
-    debugPrint('✅ Location saved to Firestore');
-  } catch (e) {
-    debugPrint('❌ Error getting location: $e');
-  }
+// ✅ Get current IST date properly
+function getISTDate() {
+  const now = new Date();
+  const istOffset = 5.5 * 60 * 60 * 1000; // +5:30 hrs
+  const utcTime = now.getTime() + (now.getTimezoneOffset() * 60 * 1000);
+  return new Date(utcTime + istOffset);
 }
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-
-  // Initialize Firebase
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
-
-  // Initialize FCM background handler
-  FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
-
-  // Request notification permission
-  final messaging = FirebaseMessaging.instance;
-  await messaging.requestPermission(
-    alert: true,
-    badge: true,
-    sound: true,
-  );
-
-  // Get FCM token (print it for testing)
-  String? token = await messaging.getToken();
-  debugPrint('🔑 FCM Token: $token');
-
-  runApp(
-    ChangeNotifierProvider(
-      create: (_) => ThemeManager(),
-      child: const MyApp(),
-    ),
-  );
+// ✅ Utility: Calculate distance between coordinates (in meters)
+function calculateDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371e3;
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δφ = (lat2 - lat1) * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
+  const a =
+    Math.sin(Δφ / 2) ** 2 +
+    Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
 }
 
-class MyApp extends StatefulWidget {
-  const MyApp({super.key});
-
-  @override
-  State<MyApp> createState() => _MyAppState();
-}
-
-class _MyAppState extends State<MyApp> {
-  bool _loading = true;
-  bool _hasProfile = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _checkUserProfile();
-    _setupFCM();
-    _requestLocationPermission();
-  }
-
-  // Setup FCM for foreground messages
-  void _setupFCM() {
-    // Handle foreground messages
-    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-      debugPrint('📨 Foreground message received: ${message.data}');
+// ==================================================================
+// 🔁 LISTENER FOR LOCATIONS (attendance marking with auto subject detection)
+// ==================================================================
+db.collection('locations').onSnapshot(async (snapshot) => {
+  snapshot.docChanges().forEach(async (change) => {
+    if (change.type === 'added') {
+      const data = change.doc.data();
+      const { uid, latitude, longitude, dataType } = data;
       
-      // Check if it's a location request
-      if (message.data['type'] == 'location_request') {
-        _handleLocationRequest(message);
-      }
-    });
+      // Check if it's a location_request type
+      if (!uid || !latitude || !longitude || dataType !== 'location_request') return;
 
-    // Handle notification tap (when app is in background)
-    FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
-      debugPrint('🔔 Notification tapped: ${message.messageId}');
-    });
-  }
+      console.log(`📍 New location received for ${uid}`);
 
-  // Request location permission
-  Future<void> _requestLocationPermission() async {
-    LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-    }
-    
-    // Request "Allow all the time" for background location
-    if (permission == LocationPermission.whileInUse) {
-      debugPrint('⚠️ Consider requesting "Allow all the time" permission');
-    }
-  }
+      // Get current IST time
+      const istDate = getISTDate();
+      const currentDay = istDate.toLocaleString('en-US', { weekday: 'long' }).toLowerCase();
+      const currentTime = istDate.toTimeString().split(' ')[0]; // HH:MM:SS
+      const [currentHour, currentMinute] = currentTime.split(':').map(Number);
 
-  Future<void> _checkUserProfile() async {
-    try {
-      // Get or create Firebase Auth user
-      User? user = FirebaseAuth.instance.currentUser;
+      // Find which subject just ended for this user
+      const subjectsSnapshot = await db.collection('users').doc(uid).collection('subjects').get();
       
-      if (user == null) {
-        // Sign in anonymously if no user exists
-        UserCredential userCredential = await FirebaseAuth.instance.signInAnonymously();
-        user = userCredential.user;
+      let matchedSubjectId = null;
+      let matchedSubjectData = null;
+
+      for (const subjectDoc of subjectsSnapshot.docs) {
+        const subjectData = subjectDoc.data();
+        const schedule = subjectData.schedule || {};
+
+        const matchingDayKey = Object.keys(schedule).find(
+          key => key.toLowerCase() === currentDay
+        );
+        if (!matchingDayKey) continue;
+
+        let endTime;
+        const scheduleEntry = schedule[matchingDayKey];
+        if (Array.isArray(scheduleEntry) && scheduleEntry.length > 0) {
+          endTime = scheduleEntry[0].end;
+        } else if (scheduleEntry && scheduleEntry.end) {
+          endTime = scheduleEntry.end;
+        }
+
+        if (!endTime) continue;
+
+        const [endH, endM] = endTime.split(':').map(Number);
+
+        // Check if this class just ended (within 10 minutes window)
+        const timeDiffMinutes = (currentHour * 60 + currentMinute) - (endH * 60 + endM);
+        
+        if (timeDiffMinutes >= 0 && timeDiffMinutes <= 10) {
+          matchedSubjectId = subjectDoc.id;
+          matchedSubjectData = subjectData;
+          break;
+        }
       }
 
-      if (user == null) {
-        setState(() => _loading = false);
+      if (!matchedSubjectId || !matchedSubjectData) {
+        console.log(`❌ No matching subject found for ${uid} at current time`);
         return;
       }
 
-      // Check if user profile exists
-      var doc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(user.uid)
-          .get();
+      console.log(`✅ Matched subject: ${matchedSubjectId} for ${uid}`);
 
-      setState(() {
-        _hasProfile = doc.exists;
-        _loading = false;
-      });
-    } catch (e) {
-      debugPrint('Error checking profile: $e');
-      setState(() => _loading = false);
+      const classLat = matchedSubjectData.location?.latitude;
+      const classLon = matchedSubjectData.location?.longitude;
+      const accuracyThreshold = matchedSubjectData.location?.accuracy || 50;
+
+      if (!classLat || !classLon) {
+        console.log(`❌ No location set for subject ${matchedSubjectId}`);
+        return;
+      }
+
+      const distance = calculateDistance(latitude, longitude, classLat, classLon);
+      const dayNumber = istDate.getDate();
+      const monthName = istDate.toLocaleString('en-US', { month: 'long', timeZone: 'Asia/Kolkata' }).toLowerCase();
+      const year = istDate.getFullYear();
+      const monthYear = `${monthName} ${year}`;
+
+      const attendanceRef = db.collection('users')
+        .doc(uid)
+        .collection('subjects')
+        .doc(matchedSubjectId)
+        .collection('attendance')
+        .doc(monthYear);
+
+      const attendanceDoc = await attendanceRef.get();
+      const attendanceData = attendanceDoc.exists ? attendanceDoc.data() : {};
+      const presentDays = attendanceData.present || [];
+      const absentDays = attendanceData.absent || [];
+
+      if (!presentDays.includes(dayNumber) && !absentDays.includes(dayNumber)) {
+        if (distance <= accuracyThreshold) {
+          await attendanceRef.set({
+            present: admin.firestore.FieldValue.arrayUnion(dayNumber)
+          }, { merge: true });
+          console.log(`✅ Marked PRESENT for ${uid}, subject ${matchedSubjectId} (distance: ${Math.round(distance)}m)`);
+        } else {
+          await attendanceRef.set({
+            absent: admin.firestore.FieldValue.arrayUnion(dayNumber)
+          }, { merge: true });
+          console.log(`❌ Marked ABSENT for ${uid}, subject ${matchedSubjectId} (distance: ${Math.round(distance)}m)`);
+        }
+      } else {
+        console.log(`⚠️ Attendance already marked for ${uid} on day ${dayNumber}`);
+      }
     }
-  }
+  });
+});
 
-  @override
-  Widget build(BuildContext context) {
-    final themeManager = Provider.of<ThemeManager>(context);
+// ==================================================================
+// 🧭 CLASS SCANNING & SCHEDULE CREATION
+// ==================================================================
+async function scanAndQueueClasses() {
+  const istDate = getISTDate();
+  const currentDay = istDate.toLocaleString('en-US', { weekday: 'long' }).toLowerCase();
+  const timeString = istDate.toTimeString().split(' ')[0];
+  console.log(`\n🔍 Scanning for classes on ${currentDay} - ${timeString}`);
 
-    if (_loading) {
-      return const MaterialApp(
-        home: Scaffold(
-          body: Center(child: CircularProgressIndicator()),
-        ),
+  const usersSnapshot = await db.collection('users').get();
+
+  for (const userDoc of usersSnapshot.docs) {
+    const userId = userDoc.id;
+    const subjectsSnapshot = await db.collection('users').doc(userId).collection('subjects').get();
+
+    for (const subjectDoc of subjectsSnapshot.docs) {
+      const subjectId = subjectDoc.id;
+      const subjectData = subjectDoc.data();
+      const schedule = subjectData.schedule || {};
+
+      const matchingDayKey = Object.keys(schedule).find(
+        key => key.toLowerCase() === currentDay
       );
-    }
+      if (!matchingDayKey) continue;
 
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Self Attendance',
-      theme: ThemeData(
-        brightness: Brightness.light,
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
-        useMaterial3: true,
-      ),
-      darkTheme: ThemeData(
-        brightness: Brightness.dark,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.indigo,
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
-      themeMode: themeManager.themeMode,
-      routes: {
-        '/home': (_) => const HomeScreen(),
-        '/profile': (_) => const ProfileSetupScreen(),
-        '/view-profile': (_) => ProfileScreen(),
-      },
-      home: _hasProfile ? const HomeScreen() : const ProfileSetupScreen(),
-    );
+      let startTime, endTime;
+      const scheduleEntry = schedule[matchingDayKey];
+      if (Array.isArray(scheduleEntry) && scheduleEntry.length > 0) {
+        startTime = scheduleEntry[0].start;
+        endTime = scheduleEntry[0].end;
+      } else if (scheduleEntry && scheduleEntry.start) {
+        startTime = scheduleEntry.start;
+        endTime = scheduleEntry.end;
+      }
+
+      if (!startTime || !endTime) continue;
+
+      const [endH, endM] = endTime.split(':').map(Number);
+
+      const classEnd = new Date(istDate);
+      classEnd.setHours(endH, endM, 0, 0);
+
+      const endTimeISTString = classEnd.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+
+      const existingSchedule = await db.collection('schedule')
+        .where('userId', '==', userId)
+        .where('subjectId', '==', subjectId)
+        .where('date', '==', istDate.toDateString())
+        .get();
+
+      if (!existingSchedule.empty) continue;
+
+      await db.collection('schedule').add({
+        userId,
+        subjectId,
+        timestamp: `timestamp${endTimeISTString}`,
+        endTime: admin.firestore.Timestamp.fromDate(classEnd),
+        date: istDate.toDateString()
+      });
+
+      console.log(`🗓️ Added to schedule: ${userId} - ${subjectId} @ ${endTimeISTString}`);
+    }
   }
 }
+
+// ==================================================================
+// 👂 OBSERVE SCHEDULE COLLECTION & SEND FCM AT END TIME (ONLY ONCE)
+// ==================================================================
+db.collection('schedule').onSnapshot(async (snapshot) => {
+  const now = getISTDate();
+  snapshot.docChanges().forEach(async (change) => {
+    if (change.type === 'added') {
+      const data = change.doc.data();
+      const { userId, subjectId, endTime } = data;
+      if (!userId || !subjectId || !endTime) return;
+
+      const endDate = endTime.toDate();
+      const diff = endDate.getTime() - now.getTime();
+      if (diff <= 0) return;
+
+      console.log(`🕒 FCM will be sent exactly at end of class ${subjectId} for ${userId} (in ${Math.round(diff / 60000)} mins)`);
+
+      // Send FCM exactly at end time (only one FCM)
+      setTimeout(async () => {
+        await sendLocationRequest(userId);
+      }, diff);
+    }
+  });
+});
+
+// ==================================================================
+// 🚀 Send FCM (NEW METHOD using googleapis)
+// ==================================================================
+async function sendLocationRequest(userId) {
+  try {
+    const userDoc = await db.collection('users').doc(userId).get();
+    if (!userDoc.exists) return;
+
+    const fcmToken = userDoc.data().fcmToken;
+    if (!fcmToken) {
+      console.log(`❌ No FCM token for user ${userId}`);
+      return;
+    }
+
+    console.log('🔄 Getting access token...');
+    
+    // Get access token using googleapis
+    const jwtClient = new google.auth.JWT({
+      email: serviceAccount.client_email,
+      key: serviceAccount.private_key,
+      scopes: ['https://www.googleapis.com/auth/firebase.messaging']
+    });
+    
+    const tokens = await jwtClient.authorize();
+    console.log('✅ Access token obtained');
+
+    // Prepare FCM message
+    const message = {
+      message: {
+        token: fcmToken,
+        data: {
+          type: 'location_request'
+        },
+        android: {
+          priority: 'high'
+        }
+      }
+    };
+
+    console.log('📤 Sending notification...');
+
+    // Send request
+    const data = JSON.stringify(message);
+    const options = {
+      hostname: 'fcm.googleapis.com',
+      port: 443,
+      path: `/v1/projects/${serviceAccount.project_id}/messages:send`,
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${tokens.access_token}`,
+        'Content-Type': 'application/json',
+        'Content-Length': data.length
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let responseData = '';
+      
+      res.on('data', (chunk) => {
+        responseData += chunk;
+      });
+      
+      res.on('end', () => {
+        if (res.statusCode === 200) {
+          console.log(`✅ FCM sent successfully to ${userId}`);
+        } else {
+          console.log(`❌ FCM Error Status: ${res.statusCode}, Response: ${responseData}`);
+        }
+      });
+    });
+
+    req.on('error', (error) => {
+      console.error(`❌ FCM Request failed for ${userId}:`, error.message);
+    });
+
+    req.write(data);
+    req.end();
+
+  } catch (err) {
+    console.error(`❌ Error sending FCM to ${userId}:`, err.message);
+  }
+}
+
+// ==================================================================
+// 🩺 Health Check & Ping
+// ==================================================================
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timeIST: getISTDate().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) });
+});
+app.get('/ping', (req, res) => res.status(200).send('OK'));
+
+// ==================================================================
+// 📍 Submit Location API
+// ==================================================================
+app.post('/submit-location', async (req, res) => {
+  try {
+    const { userId, subjectId, latitude, longitude } = req.body;
+    if (!userId || !subjectId || !latitude || !longitude)
+      return res.status(400).json({ error: 'Missing required fields' });
+
+    await db.collection('locations').add({
+      userId,
+      subjectId,
+      latitude,
+      longitude,
+      timestamp: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    console.log(`✅ Location stored for ${userId}, ${subjectId}`);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('❌ Error storing location:', e);
+    res.status(500).json({ error: 'Failed to store location' });
+  }
+});
+
+// ==================================================================
+// 🚀 SERVER START
+// ==================================================================
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, async () => {
+  console.log('🚀 Starting server...');
+  console.log('🇮🇳 Using Indian Standard Time (IST)');
+  await scanAndQueueClasses(); // initial scan
+  console.log(`✅ Server running on port ${PORT}`);
+});
+
+setInterval(scanAndQueueClasses, 60 * 1000);
