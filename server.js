@@ -144,11 +144,29 @@ db.collection('locations').onSnapshot(async (snapshot) => {
             present: admin.firestore.FieldValue.arrayUnion(dayNumber)
           }, { merge: true });
           console.log(`✅ Marked PRESENT for ${uid}, subject ${matchedSubjectId} (distance: ${Math.round(distance)}m)`);
+          
+          // Save to notification collection
+          await db.collection('notification').add({
+            uid: uid,
+            subjectId: matchedSubjectId,
+            dateTime: admin.firestore.FieldValue.serverTimestamp(),
+            status: 'present'
+          });
+          
         } else {
           await attendanceRef.set({
             absent: admin.firestore.FieldValue.arrayUnion(dayNumber)
           }, { merge: true });
           console.log(`❌ Marked ABSENT for ${uid}, subject ${matchedSubjectId} (distance: ${Math.round(distance)}m)`);
+          
+          // Save to notification collection
+          await db.collection('notification').add({
+            uid: uid,
+            subjectId: matchedSubjectId,
+            dateTime: admin.firestore.FieldValue.serverTimestamp(),
+            status: 'absent'
+          });
+          
         }
       } else {
         console.log(`⚠️ Attendance already marked for ${uid} on day ${dayNumber}`);
