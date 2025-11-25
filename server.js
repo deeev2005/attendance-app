@@ -193,6 +193,14 @@ async function scanAndQueueClasses() {
     for (const subjectDoc of subjectsSnapshot.docs) {
       const subjectId = subjectDoc.id;
       const subjectData = subjectDoc.data();
+      
+      // ✅ Check if automatic field is 'yes'
+      const automatic = subjectData.automatic;
+      if (automatic !== 'yes') {
+        console.log(`⏭️ Skipping ${userId} - ${subjectId} (automatic: ${automatic})`);
+        continue;
+      }
+      
       const schedule = subjectData.schedule || {};
 
       const matchingDayKey = Object.keys(schedule).find(
