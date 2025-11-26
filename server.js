@@ -201,6 +201,13 @@ async function scanAndQueueClasses() {
         continue;
       }
       
+      // ✅ Check if location field exists and is not empty
+      const location = subjectData.location;
+      if (!location || !location.latitude || !location.longitude) {
+        console.log(`⏭️ Skipping ${userId} - ${subjectId} (location not set)`);
+        continue;
+      }
+      
       const schedule = subjectData.schedule || {};
 
       const matchingDayKey = Object.keys(schedule).find(
