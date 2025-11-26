@@ -113,7 +113,7 @@ db.collection('locations').onSnapshot(async (snapshot) => {
 
       const classLat = matchedSubjectData.location?.latitude;
       const classLon = matchedSubjectData.location?.longitude;
-      const accuracyThreshold = matchedSubjectData.location?.accuracy || 50;
+      const accuracyThreshold = 30;
 
       if (!classLat || !classLon) {
         console.log(`❌ No location set for subject ${matchedSubjectId}`);
@@ -204,7 +204,6 @@ async function scanAndQueueClasses() {
       // ✅ Check if location field exists and is not empty
       const location = subjectData.location;
       if (!location || !location.latitude || !location.longitude) {
-        console.log(`⏭️ Skipping ${userId} - ${subjectId} (location not set)`);
         continue;
       }
       
