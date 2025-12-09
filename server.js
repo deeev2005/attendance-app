@@ -228,10 +228,9 @@ async function scanAndQueueClasses() {
 
       const [endH, endM] = endTime.split(':').map(Number);
 
+      // ✅ FIX: Create class end time properly in IST
       const classEnd = new Date(istDate);
       classEnd.setHours(endH, endM, 0, 0);
-
-      const endTimeISTString = classEnd.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
       const existingSchedule = await db.collection('schedule')
         .where('userId', '==', userId)
@@ -244,12 +243,12 @@ async function scanAndQueueClasses() {
       await db.collection('schedule').add({
         userId,
         subjectId,
-        timestamp: `timestamp${endTimeISTString}`,
+        timestamp: `timestamp${classEnd.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`,
         endTime: admin.firestore.Timestamp.fromDate(classEnd),
         date: istDate.toDateString()
       });
 
-      console.log(`🗓️ Added to schedule: ${userId} - ${subjectId} @ ${endTimeISTString}`);
+      console.log(`🗓️ Added to schedule: ${userId} - ${subjectId} @ ${classEnd.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`);
     }
   }
 }
@@ -258,16 +257,21 @@ async function scanAndQueueClasses() {
 // 👂 OBSERVE SCHEDULE COLLECTION & SEND FCM AT END TIME (ONLY ONCE)
 // ==================================================================
 db.collection('schedule').onSnapshot(async (snapshot) => {
-  const now = getISTDate();
   snapshot.docChanges().forEach(async (change) => {
     if (change.type === 'added') {
       const data = change.doc.data();
       const { userId, subjectId, endTime } = data;
       if (!userId || !subjectId || !endTime) return;
 
+      // ✅ FIX: Get current IST time for comparison
+      const now = getISTDate();
       const endDate = endTime.toDate();
       const diff = endDate.getTime() - now.getTime();
-      if (diff <= 0) return;
+      
+      if (diff <= 0) {
+        console.log(`⏭️ Skipping past class ${subjectId} for ${userId} (already ended)`);
+        return;
+      }
 
       console.log(`🕒 FCM will be sent exactly at end of class ${subjectId} for ${userId} (in ${Math.round(diff / 60000)} mins)`);
 
