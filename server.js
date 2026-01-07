@@ -82,22 +82,27 @@ db.collection('locations').onSnapshot(async (snapshot) => {
         );
         if (!matchingDayKey) continue;
 
-        let endTime;
+        let startTime, endTime;
         const scheduleEntry = schedule[matchingDayKey];
         if (Array.isArray(scheduleEntry) && scheduleEntry.length > 0) {
+          startTime = scheduleEntry[0].start;
           endTime = scheduleEntry[0].end;
-        } else if (scheduleEntry && scheduleEntry.end) {
+        } else if (scheduleEntry && scheduleEntry.start) {
+          startTime = scheduleEntry.start;
           endTime = scheduleEntry.end;
         }
 
-        if (!endTime) continue;
+        if (!startTime || !endTime) continue;
 
+        const [startH, startM] = startTime.split(':').map(Number);
         const [endH, endM] = endTime.split(':').map(Number);
 
-        // Check if this class just ended (within 10 minutes window)
-        const timeDiffMinutes = (currentHour * 60 + currentMinute) - (endH * 60 + endM);
+        // ✅ CHANGED: Check if current time is within the class period (start to end)
+        const currentMinutesFromMidnight = currentHour * 60 + currentMinute;
+        const startMinutesFromMidnight = startH * 60 + startM;
+        const endMinutesFromMidnight = endH * 60 + endM;
         
-        if (timeDiffMinutes >= 0 && timeDiffMinutes <= 10) {
+        if (currentMinutesFromMidnight >= startMinutesFromMidnight && currentMinutesFromMidnight <= endMinutesFromMidnight + 10) {
           matchedSubjectId = subjectDoc.id;
           matchedSubjectData = subjectData;
           break;
