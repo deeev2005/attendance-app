@@ -226,11 +226,17 @@ async function scanAndQueueClasses() {
 
       if (!startTime || !endTime) continue;
 
+      const [startH, startM] = startTime.split(':').map(Number);
       const [endH, endM] = endTime.split(':').map(Number);
 
-      // ✅ FIX: Create class end time properly in IST
+      // ✅ CHANGED: Calculate middle time of the class
+      const classStart = new Date(istDate);
+      classStart.setHours(startH, startM, 0, 0);
+      
       const classEnd = new Date(istDate);
       classEnd.setHours(endH, endM, 0, 0);
+      
+      const middleTime = new Date((classStart.getTime() + classEnd.getTime()) / 2);
 
       const existingSchedule = await db.collection('schedule')
         .where('userId', '==', userId)
@@ -243,12 +249,12 @@ async function scanAndQueueClasses() {
       await db.collection('schedule').add({
         userId,
         subjectId,
-        timestamp: `timestamp${classEnd.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`,
-        endTime: admin.firestore.Timestamp.fromDate(classEnd),
+        timestamp: `timestamp${middleTime.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`,
+        endTime: admin.firestore.Timestamp.fromDate(middleTime),
         date: istDate.toDateString()
       });
 
-      console.log(`🗓️ Added to schedule: ${userId} - ${subjectId} @ ${classEnd.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`);
+      console.log(`🗓️ Added to schedule: ${userId} - ${subjectId} @ ${middleTime.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`);
     }
   }
 }
@@ -273,7 +279,7 @@ db.collection('schedule').onSnapshot(async (snapshot) => {
         return;
       }
 
-      console.log(`🕒 FCM will be sent exactly at end of class ${subjectId} for ${userId} (in ${Math.round(diff / 60000)} mins)`);
+      console.log(`🕒 FCM will be sent exactly at middle of class ${subjectId} for ${userId} (in ${Math.round(diff / 60000)} mins)`);
 
       // Send FCM exactly at end time (only one FCM)
       setTimeout(async () => {
